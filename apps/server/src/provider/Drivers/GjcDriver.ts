@@ -78,7 +78,7 @@ export const GjcDriver: ProviderDriver<GjcSettings, GjcDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
     displayName: "GJC",
-    supportsMultipleInstances: true,
+    supportsMultipleInstances: false,
   },
   configSchema: GjcSettings,
   defaultConfig: (): GjcSettings => decodeGjcSettings({}),

@@ -7,7 +7,7 @@ describe("GjcDriver", () => {
     expect(GjcDriver.driverKind).toBe("gjc");
     expect(GjcDriver.metadata).toEqual({
       displayName: "GJC",
-      supportsMultipleInstances: true,
+      supportsMultipleInstances: false,
     });
     expect(GjcDriver.defaultConfig()).toMatchObject({
       enabled: true,
