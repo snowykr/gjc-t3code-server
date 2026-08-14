@@ -147,6 +147,8 @@ describe("ProviderCommandReactor", () => {
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
+    readonly steer?: "supported" | "unsupported";
+    readonly steerTurnError?: string;
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
@@ -236,6 +238,17 @@ describe("ProviderCommandReactor", () => {
       }),
     );
     const interruptTurn = vi.fn((_: unknown) => Effect.void);
+    const steerTurn = vi.fn((_: unknown) =>
+      input?.steerTurnError
+        ? Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: "codex",
+              method: "session/prompt",
+              detail: input.steerTurnError,
+            }),
+          )
+        : Effect.void,
+    );
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
     const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(() => Effect.void);
     const stopSession = vi.fn((input: unknown) =>
@@ -312,6 +325,7 @@ describe("ProviderCommandReactor", () => {
       startSession: startSession as ProviderServiceShape["startSession"],
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
+      steerTurn: steerTurn as NonNullable<ProviderServiceShape["steerTurn"]>,
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
       stopSession: stopSession as ProviderServiceShape["stopSession"],
@@ -319,6 +333,7 @@ describe("ProviderCommandReactor", () => {
       getCapabilities: (_provider) =>
         Effect.succeed({
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
+          ...(input?.steer !== undefined ? { steer: input.steer } : {}),
         }),
       getInstanceInfo: (instanceId) => {
         const raw = String(instanceId);
@@ -495,6 +510,7 @@ describe("ProviderCommandReactor", () => {
       startSession,
       sendTurn,
       interruptTurn,
+      steerTurn,
       respondToRequest,
       respondToUserInput,
       stopSession,
@@ -661,6 +677,64 @@ describe("ProviderCommandReactor", () => {
       expect(thread?.session?.lastError).toBeNull();
     }),
   );
+
+  it("redacts secret-looking material from session lastError without rewriting generic detail", async () => {
+    // A generic failure mentioning a token is NOT an auth failure: the
+    // adapter boundary maps proven auth failures to the auth message; the
+    // reactor only redacts secret-looking values.
+    const raw = "token budget exceeded: token=raw-acp-secret /home/user/.gjc/session";
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("gjc"),
+        model: "gjc",
+      },
+      startSessionEffect: (session) =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "gjc",
+            method: "authenticate",
+            detail: raw,
+          }),
+        ),
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-gjc-auth-failure"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-gjc-auth-failure"),
+          role: "user",
+          text: "start",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      return (
+        readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.session
+          ?.status === "error"
+      );
+    });
+    const readModel = await harness.readModel();
+    const lastError = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))
+      ?.session?.lastError;
+    // The generic detail is preserved (not rewritten to the auth message),
+    // with the secret value redacted.
+    expect(lastError).toContain("token budget exceeded");
+    expect(lastError).not.toBe(
+      "GJC is not authenticated. Run 'gjc setup' or check ~/.gjc credentials.",
+    );
+    expect(lastError).not.toContain(raw);
+    expect(lastError).not.toContain("raw-acp-secret");
+  });
 
   it("generates a thread title on the first turn", async () => {
     const harness = await createHarness();
@@ -2484,6 +2558,154 @@ describe("ProviderCommandReactor", () => {
     expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({
       threadId: "thread-1",
     });
+  });
+
+  it("routes thread.turn-steer-requested to a steer-capable provider", async () => {
+    const harness = await createHarness({ steer: "supported" });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-steer"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-1"),
+          adapterCapabilities: { steer: "supported" },
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-turn-steer"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-steer"),
+          role: "user",
+          text: "Use the smaller implementation.",
+          attachments: [],
+        },
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.steerTurn.mock.calls.length === 1);
+    expect(harness.steerTurn.mock.calls[0]?.[0]).toEqual({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      message: { text: "Use the smaller implementation." },
+    });
+  });
+
+  it("appends a failure activity when steer dispatch fails", async () => {
+    const harness = await createHarness({
+      steer: "supported",
+      steerTurnError: "wire steer failed",
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-steer-failure"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-steer-failure"),
+          adapterCapabilities: { steer: "supported" },
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-turn-steer-failure"),
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-steer-failure"),
+        message: {
+          messageId: asMessageId("message-steer-failure"),
+          role: "user",
+          text: "please continue",
+          attachments: [],
+        },
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      return (
+        thread?.activities.some((activity) => activity.kind === "provider.turn.steer.failed") ??
+        false
+      );
+    });
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.turn.steer.failed"),
+    ).toMatchObject({ payload: { detail: "wire steer failed" } });
+  });
+
+  it("does not call steerTurn when the live adapter is unsupported", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-steer-unsupported"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-unsupported"),
+          adapterCapabilities: { steer: "supported" },
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-turn-steer-unsupported"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-steer-unsupported"),
+          role: "user",
+          text: "This must not reach the adapter.",
+          attachments: [],
+        },
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect(harness.steerTurn.mock.calls.length).toBe(0);
   });
 
   it("starts a fresh session when only projected session state exists", async () => {

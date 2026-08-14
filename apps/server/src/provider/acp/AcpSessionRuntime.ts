@@ -195,6 +195,13 @@ export class AcpSessionRuntime extends Context.Service<
       payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
     ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
     /**
+     * Steers the active ACP prompt, or starts a fresh prompt when the host
+     * settles before dispatch.
+     */
+    readonly steer: (
+      payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
+    ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
+    /**
      * Sends a real ACP `session/cancel` notification for the active session.
      * @see https://agentclientprotocol.com/protocol/schema#session/cancel
      */
@@ -293,9 +300,15 @@ export const make = (
     const configOptionsRef = yield* Ref.make(sessionConfigOptionsFromSetup(undefined));
     const startStateRef = yield* Ref.make<AcpStartState>({ _tag: "NotStarted" });
     const promptSerializationSemaphore = yield* Semaphore.make(1);
+    const steerAdmissionSemaphore = yield* Semaphore.make(1);
+    const steerEpochRef = yield* Ref.make(0);
+    const cancelRequestedRef = yield* Ref.make<Option.Option<{ readonly epoch: number }>>(
+      Option.none(),
+    );
     const activePromptFiberRef = yield* Ref.make<
       Option.Option<Fiber.Fiber<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>>
     >(Option.none());
+    const activePromptTicketEpochRef = yield* Ref.make<Option.Option<number>>(Option.none());
     const sessionLoadGateRef = yield* Ref.make<Option.Option<SessionLoadGate>>(Option.none());
 
     const logRequest = (event: AcpSessionRequestLogEvent) =>
@@ -382,6 +395,14 @@ export const make = (
           return;
         }
         if (sessionUpdateIsReplay(notification)) {
+          // Replay frames are dropped unconditionally and session-wide: T3's
+          // own persisted activity store is the reconnect authority, and ACP
+          // replay is best-effort history only (see the GJC provider plan,
+          // reconnect-restores-from-T3-store decision). Providers that mark
+          // replay with top-level `_meta.isReplay` (GJC replay stamp) get
+          // their replayed tool-call/text history filtered here so the
+          // adapter never re-processes it; unmarked providers simply never
+          // hit this branch.
           return;
         }
         const startState = yield* Ref.get(startStateRef);
@@ -688,6 +709,226 @@ export const make = (
       return yield* effect;
     });
 
+    const cancelledPromptResponse = {
+      stopReason: "cancelled",
+    } satisfies EffectAcpSchema.PromptResponse;
+
+    const clearActivePromptHost = Effect.gen(function* () {
+      yield* Ref.set(activePromptFiberRef, Option.none());
+      yield* Ref.set(activePromptTicketEpochRef, Option.none());
+    });
+
+    const registerPromptHost = (
+      ticketEpoch: number,
+      promptRpcFiber: Fiber.Fiber<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>,
+    ) =>
+      steerAdmissionSemaphore.withPermit(
+        Effect.gen(function* () {
+          yield* Ref.set(activePromptFiberRef, Option.some(promptRpcFiber));
+          yield* Ref.set(activePromptTicketEpochRef, Option.some(ticketEpoch));
+          yield* Ref.update(cancelRequestedRef, (fence) =>
+            Option.match(fence, {
+              onNone: () => Option.none(),
+              onSome: (stamp) => (stamp.epoch <= ticketEpoch ? Option.none() : fence),
+            }),
+          );
+        }),
+      );
+
+    const freshPromptAdmission = steerAdmissionSemaphore.withPermit(
+      Effect.gen(function* () {
+        const ticketEpoch = yield* Ref.modify(
+          steerEpochRef,
+          (epoch) => [epoch + 1, epoch + 1] as const,
+        );
+        const activePromptFiber = yield* Ref.get(activePromptFiberRef);
+        if (Option.isNone(activePromptFiber)) {
+          // A normal next-turn prompt is the only ordinary fence-clearing
+          // ingress. Never clear a fence while a host is still live.
+          yield* Ref.set(cancelRequestedRef, Option.none());
+        }
+        return ticketEpoch;
+      }),
+    );
+
+    const steerAdmission = steerAdmissionSemaphore.withPermit(
+      Effect.gen(function* () {
+        const ticketEpoch = yield* Ref.modify(
+          steerEpochRef,
+          (epoch) => [epoch + 1, epoch + 1] as const,
+        );
+        const activePromptFiber = yield* Ref.get(activePromptFiberRef);
+        const hostTicketEpoch = yield* Ref.get(activePromptTicketEpochRef);
+        const cancelFence = yield* Ref.get(cancelRequestedRef);
+        const refused =
+          Option.isSome(activePromptFiber) &&
+          Option.isSome(hostTicketEpoch) &&
+          Option.isSome(cancelFence) &&
+          cancelFence.value.epoch === hostTicketEpoch.value;
+        return { ticketEpoch, activePromptFiber, hostTicketEpoch, refused };
+      }),
+    );
+
+    const promptWithTicket = (
+      ticketEpoch: number,
+      payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
+    ) =>
+      promptSerializationSemaphore.withPermit(
+        Effect.gen(function* () {
+          const started = yield* getStartedState;
+          yield* closeActiveAssistantSegment({
+            queue: eventQueue,
+            assistantSegmentRef,
+          });
+          const requestPayload = {
+            sessionId: started.sessionId,
+            ...payload,
+          } satisfies EffectAcpSchema.PromptRequest;
+          const promptRpcFiber = yield* runLoggedRequest(
+            "session/prompt",
+            requestPayload,
+            acp.agent.prompt(requestPayload),
+          ).pipe(Effect.forkIn(runtimeScope));
+          // Registration stamps the host with the phase-1 ticket, not a
+          // re-read of the shared epoch.
+          yield* registerPromptHost(ticketEpoch, promptRpcFiber);
+          return yield* Fiber.join(promptRpcFiber).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.succeed(cancelledPromptResponse)
+                : Effect.failCause(cause),
+            ),
+            Effect.ensuring(
+              Effect.gen(function* () {
+                yield* Fiber.interrupt(promptRpcFiber).pipe(Effect.ignore);
+                yield* clearActivePromptHost;
+              }),
+            ),
+            Effect.tap(() =>
+              closeActiveAssistantSegment({
+                queue: eventQueue,
+                assistantSegmentRef,
+              }),
+            ),
+          );
+        }),
+      );
+
+    const steer = (payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">) =>
+      Effect.gen(function* () {
+        const admission = yield* steerAdmission;
+        if (admission.refused) {
+          // The cancel fence settles the steer without a phantom ACP prompt.
+          return cancelledPromptResponse;
+        }
+
+        if (Option.isNone(admission.activePromptFiber)) {
+          // The host settled after phase 1. Reclassify this ticket as the next
+          // fresh prompt and clear any stale fence before taking the permit.
+          yield* steerAdmissionSemaphore.withPermit(Ref.set(cancelRequestedRef, Option.none()));
+          return yield* promptWithTicket(admission.ticketEpoch, payload);
+        }
+
+        // Recheck the fence immediately before the direct wire write. No long
+        // permit is held while a steer is dispatched.
+        const dispatch = yield* steerAdmissionSemaphore.withPermit(
+          Effect.gen(function* () {
+            const activePromptFiber = yield* Ref.get(activePromptFiberRef);
+            const hostTicketEpoch = yield* Ref.get(activePromptTicketEpochRef);
+            const cancelFence = yield* Ref.get(cancelRequestedRef);
+            if (Option.isNone(activePromptFiber)) {
+              return { _tag: "Fresh" as const };
+            }
+            if (
+              Option.isSome(hostTicketEpoch) &&
+              Option.isSome(cancelFence) &&
+              cancelFence.value.epoch === hostTicketEpoch.value
+            ) {
+              return { _tag: "Refused" as const };
+            }
+            return { _tag: "Steer" as const };
+          }),
+        );
+        if (dispatch._tag === "Refused") {
+          return cancelledPromptResponse;
+        }
+        if (dispatch._tag === "Fresh") {
+          yield* steerAdmissionSemaphore.withPermit(Ref.set(cancelRequestedRef, Option.none()));
+          return yield* promptWithTicket(admission.ticketEpoch, payload);
+        }
+
+        const started = yield* getStartedState;
+        yield* closeActiveAssistantSegment({
+          queue: eventQueue,
+          assistantSegmentRef,
+        });
+        const requestPayload = {
+          sessionId: started.sessionId,
+          ...payload,
+        } satisfies EffectAcpSchema.PromptRequest;
+        // Keep the final fence check after request logging and immediately
+        // before invoking the ACP prompt effect. A cancel started by the
+        // logger (or another concurrent caller) must win without a phantom
+        // prompt write.
+        yield* logRequest({ method: "session/prompt", payload: requestPayload, status: "started" });
+        const finalDispatch = yield* steerAdmissionSemaphore.withPermit(
+          Effect.gen(function* () {
+            const activePromptFiber = yield* Ref.get(activePromptFiberRef);
+            const hostTicketEpoch = yield* Ref.get(activePromptTicketEpochRef);
+            const cancelFence = yield* Ref.get(cancelRequestedRef);
+            const fenceMatchesAdmissionHost =
+              Option.isSome(cancelFence) &&
+              Option.isSome(admission.hostTicketEpoch) &&
+              cancelFence.value.epoch === admission.hostTicketEpoch.value;
+            if (fenceMatchesAdmissionHost) {
+              return { _tag: "Refused" as const };
+            }
+            if (Option.isNone(activePromptFiber)) {
+              return { _tag: "Fresh" as const };
+            }
+            if (
+              Option.isSome(hostTicketEpoch) &&
+              Option.isSome(cancelFence) &&
+              cancelFence.value.epoch === hostTicketEpoch.value
+            ) {
+              return { _tag: "Refused" as const };
+            }
+            return { _tag: "Steer" as const };
+          }),
+        );
+        if (finalDispatch._tag === "Refused") {
+          yield* logRequest({
+            method: "session/prompt",
+            payload: requestPayload,
+            status: "succeeded",
+            result: cancelledPromptResponse,
+          });
+          return cancelledPromptResponse;
+        }
+        if (finalDispatch._tag === "Fresh") {
+          yield* steerAdmissionSemaphore.withPermit(Ref.set(cancelRequestedRef, Option.none()));
+          return yield* promptWithTicket(admission.ticketEpoch, payload);
+        }
+        return yield* acp.agent.prompt(requestPayload).pipe(
+          Effect.tap((result) =>
+            logRequest({
+              method: "session/prompt",
+              payload: requestPayload,
+              status: "succeeded",
+              result,
+            }),
+          ),
+          Effect.onError((cause) =>
+            logRequest({
+              method: "session/prompt",
+              payload: requestPayload,
+              status: "failed",
+              cause,
+            }),
+          ),
+        );
+      });
+
     return {
       handleRequestPermission: acp.handleRequestPermission,
       handleElicitation: acp.handleElicitation,
@@ -717,51 +958,29 @@ export const make = (
       getModeState: Ref.get(modeStateRef),
       getConfigOptions: Ref.get(configOptionsRef),
       prompt: (payload) =>
-        promptSerializationSemaphore.withPermit(
-          Effect.gen(function* () {
-            const started = yield* getStartedState;
-            yield* closeActiveAssistantSegment({
-              queue: eventQueue,
-              assistantSegmentRef,
-            });
-            const requestPayload = {
-              sessionId: started.sessionId,
-              ...payload,
-            } satisfies EffectAcpSchema.PromptRequest;
-            const cancelledResponse = {
-              stopReason: "cancelled",
-            } satisfies EffectAcpSchema.PromptResponse;
-            const promptRpcFiber = yield* runLoggedRequest(
-              "session/prompt",
-              requestPayload,
-              acp.agent.prompt(requestPayload),
-            ).pipe(Effect.forkIn(runtimeScope));
-            yield* Ref.set(activePromptFiberRef, Option.some(promptRpcFiber));
-            return yield* Fiber.join(promptRpcFiber).pipe(
-              Effect.catchCause((cause) =>
-                Cause.hasInterruptsOnly(cause)
-                  ? Effect.succeed(cancelledResponse)
-                  : Effect.failCause(cause),
-              ),
-              Effect.ensuring(
-                Effect.gen(function* () {
-                  yield* Fiber.interrupt(promptRpcFiber).pipe(Effect.ignore);
-                  yield* Ref.set(activePromptFiberRef, Option.none());
-                }),
-              ),
-              Effect.tap(() =>
-                closeActiveAssistantSegment({
-                  queue: eventQueue,
-                  assistantSegmentRef,
-                }),
-              ),
-            );
-          }),
+        Effect.flatMap(freshPromptAdmission, (ticketEpoch) =>
+          promptWithTicket(ticketEpoch, payload),
         ),
+      steer,
       cancel: getStartedState.pipe(
         Effect.flatMap((started) =>
           Effect.gen(function* () {
-            const activePromptFiber = yield* Ref.get(activePromptFiberRef);
+            // Fence admission is short and precedes the existing unguarded
+            // interrupt and wire cancel. The active host's own ticket is
+            // stamped; pending admission uses the shared epoch.
+            const activePromptFiber = yield* steerAdmissionSemaphore.withPermit(
+              Effect.gen(function* () {
+                const active = yield* Ref.get(activePromptFiberRef);
+                const hostTicketEpoch = yield* Ref.get(activePromptTicketEpochRef);
+                const sharedEpoch = yield* Ref.get(steerEpochRef);
+                const epoch =
+                  Option.isSome(active) && Option.isSome(hostTicketEpoch)
+                    ? hostTicketEpoch.value
+                    : sharedEpoch;
+                yield* Ref.set(cancelRequestedRef, Option.some({ epoch }));
+                return active;
+              }),
+            );
             if (Option.isSome(activePromptFiber)) {
               yield* Fiber.interrupt(activePromptFiber.value).pipe(Effect.ignore);
             }

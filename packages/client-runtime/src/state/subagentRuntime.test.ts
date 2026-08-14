@@ -96,6 +96,84 @@ describe("foldSubagentActivities", () => {
     expect(agent.completedAt).not.toBeNull();
   });
 
+  it("folds a GJC batch start and normal terminal into one row", () => {
+    const agents = fold([
+      activity("task.started", {
+        taskId: "batch-tool-1",
+        taskType: "subagent",
+        description: "Fallback task description",
+        agentName: "reviewer",
+        requestedTaskIds: ["requested-a", "requested-b"],
+        subagentCount: 2,
+      }),
+      activity("task.completed", {
+        taskId: "batch-tool-1",
+        taskType: "subagent",
+        status: "completed",
+        agentName: "reviewer",
+        requestedTaskIds: ["requested-a", "requested-b"],
+        agentIds: ["allocated-a", "allocated-b"],
+        subagentCount: 2,
+      }),
+    ]);
+
+    expect(agents).toHaveLength(1);
+    expect(agents[0]).toMatchObject({
+      title: "reviewer",
+      agentName: "reviewer",
+      agentIds: ["allocated-a", "allocated-b"],
+      subagentCount: 2,
+      status: "completed",
+    });
+  });
+
+  it("preserves requested ids and fallback reason when allocation ids are unavailable", () => {
+    const agents = fold([
+      activity("task.completed", {
+        taskId: "batch-tool-fallback",
+        taskType: "subagent",
+        description: "Schedule reviewers",
+        agentName: "reviewer",
+        requestedTaskIds: ["requested-a", "requested-b"],
+        subagentCount: 2,
+        allocatedIdsUnavailable: true,
+        reason: "scheduling_failed",
+        status: "failed",
+      }),
+    ]);
+
+    expect(agents).toHaveLength(1);
+    expect(agents[0]).toMatchObject({
+      title: "reviewer",
+      requestedTaskIds: ["requested-a", "requested-b"],
+      subagentCount: 2,
+      allocatedIdsUnavailable: true,
+      reason: "scheduling_failed",
+      status: "failed",
+    });
+  });
+
+  it("skips malformed batch rows without affecting valid rows", () => {
+    const agents = fold([
+      activity("task.started", {
+        taskId: 42,
+        taskType: "subagent",
+        agentName: "bad",
+        requestedTaskIds: ["requested-a"],
+      }),
+      activity("task.started", {
+        taskId: "batch-valid",
+        taskType: "subagent",
+        agentName: "valid",
+        requestedTaskIds: ["requested-a"],
+        subagentCount: 1,
+      }),
+    ]);
+
+    expect(agents).toHaveLength(1);
+    expect(agents[0]!.id).toBe("batch-valid");
+  });
+
   it("progress can create an agent when its start row aged out of retention", () => {
     const agents = fold([
       activity("task.progress", {

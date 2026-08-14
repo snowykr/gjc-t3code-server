@@ -14,6 +14,7 @@ import type {
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
+  ChatAttachment,
   ProviderSession,
   ProviderSessionStartInput,
   ThreadId,
@@ -30,6 +31,11 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /**
+   * Declares whether an in-flight turn can be steered. Omitted by legacy
+   * adapters and therefore treated as unsupported (fail closed).
+   */
+  readonly steer?: "supported" | "unsupported";
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -67,6 +73,19 @@ export interface ProviderAdapterShape<TError> {
    * Interrupt an active turn.
    */
   readonly interruptTurn: (threadId: ThreadId, turnId?: TurnId) => Effect.Effect<void, TError>;
+
+  /**
+   * Deliver a message to an already-running provider turn. Optional so legacy
+   * adapters remain source-compatible; callers must guard capabilities.steer.
+   */
+  readonly steerTurn?: (input: {
+    readonly threadId: ThreadId;
+    readonly turnId?: TurnId;
+    readonly message: {
+      readonly text: string;
+      readonly attachments?: ReadonlyArray<ChatAttachment>;
+    };
+  }) => Effect.Effect<void, TError>;
 
   /**
    * Respond to an interactive approval request.

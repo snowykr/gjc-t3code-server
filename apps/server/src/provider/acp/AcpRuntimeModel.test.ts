@@ -8,6 +8,7 @@ import {
   parsePermissionRequest,
   parseSessionModeState,
   parseSessionUpdateEvent,
+  readGjcTaskLifecycleBoundary,
   sessionUpdateIsReplay,
   syntheticLoadSessionResponseFromInitialize,
 } from "./AcpRuntimeModel.ts";
@@ -255,6 +256,97 @@ describe("AcpRuntimeModel", () => {
     }
   });
 
+  it("classifies only current GJC task metadata boundaries", () => {
+    const started = {
+      _meta: {
+        gjc: {
+          agentName: " custom-agent ",
+          requestedTaskIds: ["task-a", " task-b "],
+          subagentCount: 2,
+        },
+      },
+      update: { sessionUpdate: "tool_call", toolCallId: "tool-batch" },
+    };
+    expect(readGjcTaskLifecycleBoundary(started)).toEqual({
+      kind: "started",
+      agentName: "custom-agent",
+      requestedTaskIds: ["task-a", "task-b"],
+      subagentCount: 2,
+    });
+
+    expect(
+      readGjcTaskLifecycleBoundary({
+        _meta: { gjc: { requestedTaskIds: ["task-a", "task-b"] } },
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tool-batch" },
+      }),
+    ).toEqual({
+      kind: "fallback",
+      requestedTaskIds: ["task-a", "task-b"],
+      subagentCount: 2,
+      reason: "no_allocated_agent_ids",
+    });
+
+    expect(
+      readGjcTaskLifecycleBoundary({
+        _meta: {
+          gjc: {
+            requestedTaskIds: ["task-a"],
+            agentIds: ["allocated-a"],
+            subagentCount: 1,
+          },
+        },
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tool-batch" },
+      }),
+    ).toEqual({ kind: "completed", agentIds: ["allocated-a"], subagentCount: 1 });
+
+    // Partial failure: some tasks spawned (agentIds present) while others
+    // failed to schedule (reason present) — must NOT classify as a clean
+    // completion.
+    expect(
+      readGjcTaskLifecycleBoundary({
+        _meta: {
+          gjc: {
+            requestedTaskIds: ["task-a", "task-b"],
+            agentIds: ["allocated-a"],
+            subagentCount: 2,
+            reason: "scheduling_failed",
+          },
+        },
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tool-batch" },
+      }),
+    ).toEqual({
+      kind: "completed",
+      agentIds: ["allocated-a"],
+      subagentCount: 2,
+      reason: "scheduling_failed",
+    });
+
+    expect(
+      readGjcTaskLifecycleBoundary({
+        _meta: {
+          gjc: {
+            requestedTaskIds: ["task-a"],
+            reason: "scheduling_failed",
+          },
+        },
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tool-batch" },
+      }),
+    ).toEqual({
+      kind: "fallback",
+      requestedTaskIds: ["task-a"],
+      subagentCount: 1,
+      reason: "scheduling_failed",
+    });
+
+    expect(
+      readGjcTaskLifecycleBoundary({
+        _meta: { gjc: { agentName: "custom-agent", requestedTaskIds: ["", "task-b"] } },
+        update: { sessionUpdate: "tool_call", toolCallId: "tool-batch" },
+      }),
+    ).toBeUndefined();
+    expect(readGjcTaskLifecycleBoundary({ _meta: { gjc: {} } })).toBeUndefined();
+  });
+
   it("trims padded current mode updates before emitting a mode change", () => {
     const result = parseSessionUpdateEvent({
       sessionId: "session-1",
@@ -329,6 +421,37 @@ describe("AcpRuntimeModel", () => {
             content: {
               type: "text",
               text: "hello from acp",
+            },
+          },
+        },
+      },
+    ]);
+  });
+
+  it("parses agent_thought_chunk as a reasoning ContentDelta", () => {
+    const thoughtResult = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: {
+          type: "text",
+          text: "reasoning step one",
+        },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(thoughtResult.events).toEqual([
+      {
+        _tag: "ContentDelta",
+        text: "reasoning step one",
+        streamKind: "reasoning_text",
+        rawPayload: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: {
+              type: "text",
+              text: "reasoning step one",
             },
           },
         },

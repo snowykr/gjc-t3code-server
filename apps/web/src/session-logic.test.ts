@@ -771,6 +771,25 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["task-progress", "task-complete"]);
   });
 
+  it("derives reasoning progress as thinking work-log entries by kind", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "reasoning-progress",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "reasoning.progress",
+        summary: "Thinking",
+        tone: "info",
+        payload: { detail: "considering the next step" },
+      }),
+    ]);
+    expect(entries[0]).toMatchObject({
+      id: "reasoning-progress",
+      tone: "thinking",
+      detail: "considering the next step",
+      sourceActivityKind: "reasoning.progress",
+    });
+  });
+
   it("uses payload summary as label for task entries when available", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

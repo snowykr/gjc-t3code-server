@@ -19,17 +19,38 @@ import { createModelSelection } from "@t3tools/shared/model";
 import {
   ApprovalRequestId,
   CursorSettings,
+  EventId,
   ProviderDriverKind,
   type ProviderRuntimeEvent,
   ThreadId,
+  TurnId,
   ProviderInstanceId,
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import type { CursorAdapterShape } from "../Services/CursorAdapter.ts";
-import { makeCursorAdapter } from "./CursorAdapter.ts";
+import { makeCursorAdapter, makeCursorContentDeltaRuntimeEvent } from "./CursorAdapter.ts";
 const decodeCursorSettings = Schema.decodeSync(CursorSettings);
+
+it("preserves reasoning stream kind on Cursor content deltas", () => {
+  const event = makeCursorContentDeltaRuntimeEvent({
+    stamp: {
+      eventId: EventId.make("event-reasoning"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+    provider: ProviderDriverKind.make("cursor"),
+    threadId: ThreadId.make("cursor-reasoning"),
+    turnId: TurnId.make("cursor-turn"),
+    text: "thinking",
+    streamKind: "reasoning_text",
+    rawPayload: { sessionUpdate: "agent_thought_chunk" },
+  });
+  assert.equal(event.type, "content.delta");
+  if (event.type === "content.delta") {
+    assert.equal(event.payload.streamKind, "reasoning_text");
+  }
+});
 
 // Test-local service tag so the rest of the file can keep using `yield* CursorAdapter`.
 class CursorAdapter extends Context.Service<CursorAdapter, CursorAdapterShape>()(

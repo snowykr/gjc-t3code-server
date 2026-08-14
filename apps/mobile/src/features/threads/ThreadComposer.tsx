@@ -104,6 +104,7 @@ export interface ThreadComposerProps {
   readonly serverConfig: T3ServerConfig | null;
   readonly queueCount: number;
   readonly activeThreadBusy: boolean;
+  readonly canSteer: boolean;
   readonly environmentId: EnvironmentId;
   readonly projectCwd: string | null;
   readonly editorRef?: RefObject<ComposerEditorHandle | null>;
@@ -290,6 +291,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   // Opening and closing count as active so the composer stays expanded while
   // focus moves between its native editor and the settings modal.
   const isExpanded = isFocused || settingsSheetPresentation.isActive;
+  // Queued messages remain available while a provider is busy. Providers that
+  // support steering send immediately; every other busy/offline path uses the
+  // durable outbox.
   const canSend = hasContent;
 
   // Notify the parent from the derived value, not focus events: the parent
@@ -328,8 +332,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     props.selectedThread.session?.status === "running" ||
     props.selectedThread.session?.status === "starting";
 
-  const sendLabel =
-    props.connectionState !== "connected" || props.activeThreadBusy || props.queueCount > 0
+  const sendLabel = props.canSteer
+    ? "Steer"
+    : props.connectionState !== "connected" || props.activeThreadBusy || props.queueCount > 0
       ? "Queue"
       : "Send";
   const currentModelSelection = props.selectedThread.modelSelection;
@@ -830,7 +835,15 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           {!isExpanded ? (
             <Animated.View entering={FadeIn.duration(180)} exiting={FadeOut.duration(100)}>
               {showStopAction ? (
-                <ControlPill icon="stop.fill" variant="danger" onPress={props.onStopThread} />
+                <View className="flex-row gap-1">
+                  <ControlPill icon="stop.fill" variant="danger" onPress={props.onStopThread} />
+                  <ControlPill
+                    icon="arrow.up"
+                    variant="primary"
+                    disabled={!canSend}
+                    onPress={handleSend}
+                  />
+                </View>
               ) : (
                 <ControlPill
                   icon="arrow.up"

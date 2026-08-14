@@ -56,6 +56,34 @@ export interface AcpSessionModeState {
   readonly availableModes: ReadonlyArray<AcpSessionMode>;
 }
 
+export type GjcTaskLifecycleReason =
+  | "scheduling_failed"
+  | "invalid_request"
+  | "no_allocated_agent_ids";
+
+export type GjcTaskLifecycleBoundary =
+  | {
+      readonly kind: "started";
+      readonly agentName: string;
+      readonly requestedTaskIds: ReadonlyArray<string>;
+      readonly subagentCount: number;
+    }
+  | {
+      readonly kind: "completed";
+      readonly agentIds: ReadonlyArray<string>;
+      readonly subagentCount: number;
+      /** Present on a PARTIAL failure: some tasks spawned (agentIds) but
+       * others failed to schedule. The terminal must be failed/stopped, not
+       * a clean completion. */
+      readonly reason?: GjcTaskLifecycleReason;
+    }
+  | {
+      readonly kind: "fallback";
+      readonly requestedTaskIds: ReadonlyArray<string>;
+      readonly subagentCount: number;
+      readonly reason: GjcTaskLifecycleReason;
+    };
+
 export interface AcpToolCallState {
   readonly toolCallId: string;
   readonly kind?: string;
@@ -107,6 +135,7 @@ export type AcpParsedSessionEvent =
       readonly _tag: "ContentDelta";
       readonly itemId?: string;
       readonly text: string;
+      readonly streamKind?: "assistant_text" | "reasoning_text";
       readonly rawPayload: unknown;
     };
 
@@ -289,6 +318,110 @@ function normalizeToolKind(kind: unknown): string | undefined {
   return typeof kind === "string" && kind.trim().length > 0 ? kind.trim() : undefined;
 }
 
+function normalizeNonEmptyStringArray(value: unknown): ReadonlyArray<string> | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    return undefined;
+  }
+  const normalized: Array<string> = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      return undefined;
+    }
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+function normalizeSubagentCount(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
+function readGjcMeta(rawPayload: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(rawPayload) || !isRecord(rawPayload._meta)) {
+    return undefined;
+  }
+  return isRecord(rawPayload._meta.gjc) ? rawPayload._meta.gjc : undefined;
+}
+
+/**
+ * Reads only the current ACP notification's `_meta.gjc` boundary. It never
+ * consults the merged tool-call state, so metadata retained on progress rows
+ * cannot re-emit a lifecycle edge.
+ */
+export function readGjcTaskLifecycleBoundary(
+  rawPayload: unknown,
+): GjcTaskLifecycleBoundary | undefined {
+  const gjc = readGjcMeta(rawPayload);
+  if (!gjc) {
+    return undefined;
+  }
+
+  const requestedTaskIds = normalizeNonEmptyStringArray(gjc.requestedTaskIds);
+  const agentIds = normalizeNonEmptyStringArray(gjc.agentIds);
+  const agentName = typeof gjc.agentName === "string" ? gjc.agentName.trim() : undefined;
+  const reason =
+    gjc.reason === "scheduling_failed" ||
+    gjc.reason === "invalid_request" ||
+    gjc.reason === "no_allocated_agent_ids"
+      ? gjc.reason
+      : undefined;
+
+  // Allocated ids are terminal metadata and take precedence over repeated
+  // start fields on an end update. A coexisting reason marks a PARTIAL
+  // failure (some spawned, some schedule-failed) — the terminal is
+  // failed/stopped, never a clean completion.
+  if (agentIds !== undefined) {
+    return {
+      kind: "completed",
+      agentIds,
+      subagentCount: normalizeSubagentCount(gjc.subagentCount, agentIds.length),
+      ...(reason !== undefined ? { reason } : {}),
+    };
+  }
+
+  // Failure terminals carry the requested ids even when the opaque agent name
+  // is omitted from the terminal frame.
+  if (requestedTaskIds !== undefined && reason !== undefined) {
+    return {
+      kind: "fallback",
+      requestedTaskIds,
+      subagentCount: normalizeSubagentCount(gjc.subagentCount, requestedTaskIds.length),
+      reason,
+    };
+  }
+
+  const sessionUpdate =
+    isRecord(rawPayload) && isRecord(rawPayload.update)
+      ? rawPayload.update.sessionUpdate
+      : undefined;
+  if (sessionUpdate === "tool_call_update") {
+    if (!requestedTaskIds) {
+      return undefined;
+    }
+    return {
+      kind: "fallback",
+      requestedTaskIds,
+      subagentCount: requestedTaskIds.length,
+      reason: "no_allocated_agent_ids",
+    };
+  }
+
+  if (!requestedTaskIds || !agentName) {
+    return undefined;
+  }
+
+  return {
+    kind: "started",
+    agentName,
+    requestedTaskIds,
+    subagentCount: normalizeSubagentCount(gjc.subagentCount, requestedTaskIds.length),
+  };
+}
+
 function canonicalItemTypeFromAcpToolKind(kind: string | undefined): ToolLifecycleItemType {
   switch (kind) {
     case "execute":
@@ -315,6 +448,7 @@ function makeToolCallState(
     readonly rawOutput?: unknown;
     readonly content?: ReadonlyArray<EffectAcpSchema.ToolCallContent> | null | undefined;
     readonly locations?: ReadonlyArray<EffectAcpSchema.ToolCallLocation> | null | undefined;
+    readonly rawMeta?: unknown;
   },
   options?: {
     readonly fallbackStatus?: "pending" | "inProgress" | "completed" | "failed";
@@ -351,6 +485,9 @@ function makeToolCallState(
   if (input.locations !== undefined) {
     data.locations = input.locations;
   }
+  if (isRecord(input.rawMeta)) {
+    data._meta = input.rawMeta;
+  }
   const fallbackDetail = command ?? normalizedTitle ?? textContent;
   const hasPresentationSeed =
     title !== undefined ||
@@ -383,6 +520,7 @@ function parseTypedToolCallState(
   event: AcpToolCallUpdate,
   options?: {
     readonly fallbackStatus?: "pending" | "inProgress" | "completed" | "failed";
+    readonly rawMeta?: unknown;
   },
 ): AcpToolCallState | undefined {
   return makeToolCallState(
@@ -395,6 +533,7 @@ function parseTypedToolCallState(
       rawOutput: event.rawOutput,
       content: event.content,
       locations: event.locations,
+      rawMeta: options?.rawMeta,
     },
     options,
   );
@@ -543,6 +682,7 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
     case "tool_call": {
       const toolCall = parseTypedToolCallState(upd, {
         fallbackStatus: "pending",
+        rawMeta: params._meta,
       });
       if (toolCall) {
         events.push({
@@ -554,7 +694,9 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
       break;
     }
     case "tool_call_update": {
-      const toolCall = parseTypedToolCallState(upd);
+      const toolCall = parseTypedToolCallState(upd, {
+        rawMeta: params._meta,
+      });
       if (toolCall) {
         events.push({
           _tag: "ToolCallUpdated",
@@ -569,6 +711,17 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
         events.push({
           _tag: "ContentDelta",
           text: upd.content.text,
+          rawPayload: params,
+        });
+      }
+      break;
+    }
+    case "agent_thought_chunk": {
+      if (upd.content.type === "text" && upd.content.text.length > 0) {
+        events.push({
+          _tag: "ContentDelta",
+          text: upd.content.text,
+          streamKind: "reasoning_text",
           rawPayload: params,
         });
       }

@@ -79,6 +79,14 @@ const hasModelCapabilities = (model: ServerProvider["models"][number]): boolean 
   (model.capabilities?.optionDescriptors?.length ?? 0) > 0;
 
 const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
+  // GJC's successful ACP session setup supplies the complete current model
+  // catalog through its `model` config option. Retaining cache-only entries
+  // turns removed placeholders such as the former "GJC" fallback into fake
+  // selectable models.
+  if (provider.driver === ProviderDriverKind.make("gjc")) {
+    return false;
+  }
+
   if (provider.driver !== ProviderDriverKind.make("opencode")) {
     return true;
   }

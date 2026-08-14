@@ -1,9 +1,11 @@
 import {
   CommandId,
   EnvironmentId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ThreadId,
+  TurnId,
   type ClientOrchestrationCommand,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -25,6 +27,7 @@ import {
   archiveThread,
   createProject,
   settleThread,
+  steerThreadTurn,
   stopThreadSession,
   unsettleThread,
 } from "./commands.ts";
@@ -136,6 +139,41 @@ describe("environment commands", () => {
           type: "thread.archive",
           commandId: "archive-command",
           threadId: "thread-1",
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("dispatches steer with caller text and active turn", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+
+      yield* steerThreadTurn({
+        threadId: ThreadId.make("thread-1"),
+        turnId: TurnId.make("turn-1"),
+        message: {
+          messageId: MessageId.make("message-1"),
+          role: "user",
+          text: "Continue with the smaller implementation.",
+          attachments: [],
+        },
+        createdAt: "2026-06-06T00:01:00.000Z",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(dispatched).toEqual([
+        {
+          type: "thread.turn.steer",
+          commandId: "00000000-0000-4000-8000-000000000000",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          message: {
+            messageId: "message-1",
+            role: "user",
+            text: "Continue with the smaller implementation.",
+            attachments: [],
+          },
+          createdAt: "2026-06-06T00:01:00.000Z",
         },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),

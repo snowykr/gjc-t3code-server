@@ -566,6 +566,93 @@ describe("AcpSessionRuntime", () => {
     ),
   );
 
+  it.effect("suppresses marked post-load replay tool lifecycle notifications", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      const started = yield* runtime.start();
+      expect(started.sessionId).toBe("mock-session-1");
+
+      const promptResult = yield* runtime.prompt({
+        prompt: [{ type: "text", text: "hi" }],
+      });
+      expect(promptResult).toMatchObject({ stopReason: "end_turn" });
+
+      const notes = Array.from(yield* Stream.runCollect(Stream.take(runtime.getEvents(), 4)));
+      expect(notes.map((note) => note._tag)).toEqual([
+        "PlanUpdated",
+        "AssistantItemStarted",
+        "ContentDelta",
+        "AssistantItemCompleted",
+      ]);
+      const toolCallEvents = notes.filter((note) => note._tag === "ToolCallUpdated");
+      expect(toolCallEvents).toHaveLength(0);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_EMIT_POST_LOAD_REPLAY_TOOL_LIFECYCLE: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
+  it.effect("delivers unstamped post-load replay tool lifecycle notifications", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      const started = yield* runtime.start();
+      expect(started.sessionId).toBe("mock-session-1");
+
+      const promptResult = yield* runtime.prompt({
+        prompt: [{ type: "text", text: "hi" }],
+      });
+      expect(promptResult).toMatchObject({ stopReason: "end_turn" });
+
+      const notes = Array.from(yield* Stream.runCollect(Stream.take(runtime.getEvents(), 2)));
+      expect(notes.map((note) => note._tag)).toEqual(["ToolCallUpdated", "ToolCallUpdated"]);
+      const toolCallEvents = notes.filter((note) => note._tag === "ToolCallUpdated");
+      expect(toolCallEvents).toHaveLength(2);
+      expect(
+        toolCallEvents.map((note) =>
+          note._tag === "ToolCallUpdated" ? note.toolCall.status : null,
+        ),
+      ).toEqual(["pending", "completed"]);
+      expect(
+        toolCallEvents.every(
+          (note) =>
+            note._tag === "ToolCallUpdated" &&
+            note.toolCall.toolCallId === "post-load-replay-tool-1",
+        ),
+      ).toBe(true);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_EMIT_POST_LOAD_REPLAY_UNSTAMPED: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
   it.effect("completes session/load after replay becomes idle while its RPC stays pending", () =>
     Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;

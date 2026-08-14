@@ -47,7 +47,11 @@ import {
   providerTurnMetricAttributes,
   withMetrics,
 } from "../../observability/Metrics.ts";
-import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
+import {
+  type ProviderAdapterError,
+  ProviderAdapterRequestError,
+  ProviderValidationError,
+} from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
@@ -774,6 +778,62 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const steerTurn: NonNullable<ProviderServiceMethod<"steerTurn">> = Effect.fn("steerTurn")(
+    function* (input) {
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.steerTurn",
+        // Steering is only valid on the currently live session. Recovering a
+        // dead binding would create an untracked fresh prompt and orphan the
+        // already-persisted user message.
+        allowRecovery: false,
+      });
+      if (!routed.isActive) {
+        return yield* toValidationError(
+          "ProviderService.steerTurn",
+          `Cannot steer thread '${input.threadId}' because its live provider session is unavailable.`,
+        );
+      }
+      const liveSession = yield* Effect.map(routed.adapter.listSessions(), (sessions) =>
+        sessions.find((session) => session.threadId === input.threadId),
+      );
+      if (input.turnId === undefined || liveSession?.activeTurnId !== input.turnId) {
+        return yield* toValidationError(
+          "ProviderService.steerTurn",
+          `Cannot steer stale turn '${input.turnId ?? "missing"}' on thread '${input.threadId}'.`,
+        );
+      }
+      if (routed.adapter.capabilities.steer !== "supported") {
+        yield* Effect.logWarning("provider steer requested for unsupported adapter", {
+          threadId: input.threadId,
+          provider: routed.adapter.provider,
+        });
+        return yield* new ProviderAdapterRequestError({
+          provider: routed.adapter.provider,
+          method: "session/prompt",
+          detail: "Provider adapter does not support steering.",
+        });
+      }
+      const adapterSteerTurn = routed.adapter.steerTurn;
+      if (adapterSteerTurn === undefined) {
+        yield* Effect.logWarning("provider steer requested but adapter has no steerTurn", {
+          threadId: input.threadId,
+          provider: routed.adapter.provider,
+        });
+        return yield* new ProviderAdapterRequestError({
+          provider: routed.adapter.provider,
+          method: "session/prompt",
+          detail: "Provider adapter does not implement steering.",
+        });
+      }
+      yield* adapterSteerTurn({
+        threadId: routed.threadId,
+        ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+        message: input.message,
+      });
+    },
+  );
+
   const interruptTurn: ProviderServiceMethod<"interruptTurn"> = Effect.fn("interruptTurn")(
     function* (rawInput) {
       const input = yield* decodeInputOrValidationError({
@@ -1128,6 +1188,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   return {
     startSession,
     sendTurn,
+    steerTurn,
     interruptTurn,
     respondToRequest,
     respondToUserInput,

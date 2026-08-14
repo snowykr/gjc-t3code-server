@@ -31,6 +31,7 @@ import {
   effectiveSnoozed,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
+import { threadCanSteer } from "@t3tools/client-runtime/state/thread-state";
 import {
   parseScopedThreadKey,
   scopedThreadKey,
@@ -1223,6 +1224,7 @@ function ChatViewContent(props: ChatViewProps) {
     reportFailure: false,
   });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const steerThreadTurn = useAtomCommand(threadEnvironment.steerTurn, { reportFailure: false });
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
   });
@@ -1505,6 +1507,7 @@ function ChatViewContent(props: ChatViewProps) {
   // depend on which route is mounted.
   const isServerThread = activeServerThread !== null;
   const activeThread = activeServerThread ?? localDraftThread;
+  const canSteer = threadCanSteer(activeThread);
   const threadError = isServerThread
     ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
     : localDraftError;
@@ -4886,7 +4889,7 @@ function ChatViewContent(props: ChatViewProps) {
     };
     if (
       !activeThread ||
-      isSendBusy ||
+      (isSendBusy && !canSteer) ||
       isConnecting ||
       threadDetailLoading ||
       sendInFlightRef.current
@@ -5012,6 +5015,101 @@ function ChatViewContent(props: ChatViewProps) {
       }
       return;
     }
+    if (canSteer && activeThread.session?.activeTurnId) {
+      const threadIdForSteer = activeThread.id;
+      const messageIdForSteer = newMessageId();
+      const messageCreatedAt = new Date().toISOString();
+      const messageTextWithContexts = appendElementContextsToPrompt(
+        appendTerminalContextsToPrompt(trimmed, sendableComposerTerminalContexts),
+        composerElementContexts,
+      );
+      const messageTextWithPreviewAnnotations = composerPreviewAnnotations.reduce(
+        (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
+        messageTextWithContexts,
+      );
+      const messageTextForSteer = appendReviewCommentsToPrompt(
+        messageTextWithPreviewAnnotations,
+        composerReviewComments,
+      );
+      const outgoingMessageText = formatOutgoingPrompt({
+        provider: ctxSelectedProvider,
+        model: ctxSelectedModel,
+        models: ctxSelectedProviderModels,
+        effort: ctxSelectedPromptEffort,
+        text: messageTextForSteer || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+      });
+      const steerAttachments = composerImages.map(({ id, name, mimeType, sizeBytes }) => ({
+        type: "image" as const,
+        id,
+        name,
+        mimeType,
+        sizeBytes,
+      }));
+      const optimisticSteerAttachments = composerImages.map(
+        ({ id, name, mimeType, sizeBytes, previewUrl }) => ({
+          type: "image" as const,
+          id,
+          name,
+          mimeType,
+          sizeBytes,
+          previewUrl,
+        }),
+      );
+
+      setOptimisticUserMessages((existing) => [
+        ...existing,
+        {
+          id: messageIdForSteer,
+          role: "user",
+          text: outgoingMessageText,
+          ...(optimisticSteerAttachments.length > 0
+            ? { attachments: optimisticSteerAttachments }
+            : {}),
+          turnId: activeThread.session!.activeTurnId,
+          createdAt: messageCreatedAt,
+          updatedAt: messageCreatedAt,
+          streaming: false,
+        },
+      ]);
+      setThreadError(threadIdForSteer, null);
+      sendInFlightRef.current = true;
+      const steerResult = await steerThreadTurn({
+        environmentId,
+        input: {
+          threadId: threadIdForSteer,
+          turnId: activeThread.session.activeTurnId,
+          message: {
+            messageId: messageIdForSteer,
+            role: "user",
+            text: outgoingMessageText,
+            attachments: steerAttachments,
+          },
+          createdAt: messageCreatedAt,
+        },
+      });
+      if (steerResult._tag === "Failure") {
+        setOptimisticUserMessages((existing) =>
+          existing.filter((message) => message.id !== messageIdForSteer),
+        );
+        promptRef.current = promptForSend;
+        setComposerDraftPrompt(composerDraftTarget, promptForSend);
+        if (!isAtomCommandInterrupted(steerResult)) {
+          const error = squashAtomCommandFailure(steerResult);
+          setThreadError(
+            threadIdForSteer,
+            error instanceof Error ? error.message : "Failed to steer the current turn.",
+          );
+        }
+      } else {
+        acknowledgeActiveThreadWoke();
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+      }
+      sendInFlightRef.current = false;
+      return;
+    }
+
     if (!activeProject) {
       toastManager.add(
         stackedThreadToast({
@@ -6347,6 +6445,7 @@ function ChatViewContent(props: ChatViewProps) {
                             forceExpandedOnMobile={forceExpandedMobileComposer && isDraftHeroState}
                             projectSelectionRequired={isLocalDraftThread && activeProject === null}
                             phase={phase}
+                            canSteer={canSteer}
                             isConnecting={isConnecting}
                             isSendBusy={isSendBusy}
                             sendDisabledReason={threadDetailLoading ? "Messages loading" : null}

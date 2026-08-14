@@ -150,6 +150,35 @@ function makeThread(
   };
 }
 
+describe("reasoning progress work-log derivation", () => {
+  it("maps reasoning.progress by kind to thinking", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-reasoning"),
+      projectId: ProjectId.make("project-1"),
+      title: "Reasoning",
+      activities: [
+        makeActivity({
+          id: EventId.make("reasoning-progress"),
+          kind: "reasoning.progress",
+          summary: "Thinking",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: { detail: "considering the next step" },
+        }),
+      ],
+    });
+    const feed = buildThreadFeed(thread);
+    const activity = feed[0];
+    expect(activity?.type).toBe("activity-group");
+    const workEntry = activity?.type === "activity-group" ? activity.activities[0] : undefined;
+    expect(workEntry).toMatchObject({
+      id: "reasoning-progress",
+      detail: "considering the next step",
+      icon: "agent",
+      toolLike: true,
+    });
+  });
+});
+
 describe("buildThreadFeed", () => {
   it("keeps historic work entries attributed to their turns", () => {
     const thread = makeThread({
@@ -661,5 +690,38 @@ describe("quiet timeline: nested agents", () => {
     );
     expect(ids).toContain("nested-done");
     expect(ids).not.toContain("shell-done");
+  });
+
+  it("keeps a GJC batch fallback terminal row as the mobile signal", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-gjc-batch"),
+      projectId: ProjectId.make("project-1"),
+      title: "GJC batch fallback",
+      activities: [
+        makeActivity({
+          id: EventId.make("gjc-batch-fallback"),
+          kind: "task.completed",
+          summary: "Task completed",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            taskId: "batch-tool-1",
+            taskType: "subagent",
+            agentKind: "agent",
+            agentName: "reviewer",
+            requestedTaskIds: ["requested-a", "requested-b"],
+            subagentCount: 2,
+            allocatedIdsUnavailable: true,
+            reason: "scheduling_failed",
+            status: "failed",
+          },
+        }),
+      ],
+    });
+
+    const feed = buildThreadFeed(thread);
+    const ids = feed.flatMap((entry) =>
+      entry.type === "activity-group" ? entry.activities.map((row) => row.id) : [],
+    );
+    expect(ids).toContain("gjc-batch-fallback");
   });
 });

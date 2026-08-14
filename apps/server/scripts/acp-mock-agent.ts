@@ -14,6 +14,8 @@ import type * as AcpSchema from "effect-acp/schema";
 const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
 const exitLogPath = process.env.T3_ACP_EXIT_LOG_PATH;
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
+const gjcTaskLifecycleMode = process.env.T3_ACP_GJC_TASK_LIFECYCLE;
+const gjcTaskLifecycleReason = process.env.T3_ACP_GJC_TASK_REASON ?? "scheduling_failed";
 const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
 const emitGenericToolPlaceholders = process.env.T3_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
@@ -28,6 +30,10 @@ const omitXAiPromptCompleteStopReason =
   process.env.T3_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
 const failLoadSession = process.env.T3_ACP_FAIL_LOAD_SESSION === "1";
 const emitLoadReplay = process.env.T3_ACP_EMIT_LOAD_REPLAY === "1";
+const emitPostLoadReplayToolLifecycle =
+  process.env.T3_ACP_EMIT_POST_LOAD_REPLAY_TOOL_LIFECYCLE === "1";
+const emitPostLoadReplayToolLifecycleUnstamped =
+  process.env.T3_ACP_EMIT_POST_LOAD_REPLAY_UNSTAMPED === "1";
 const hangLoadSessionAfterReplay = process.env.T3_ACP_HANG_LOAD_SESSION_AFTER_REPLAY === "1";
 const delayLoadSessionAfterReplay = process.env.T3_ACP_DELAY_LOAD_SESSION_AFTER_REPLAY === "1";
 const loadSessionDelayMs = Number(process.env.T3_ACP_LOAD_SESSION_DELAY_MS ?? "5000");
@@ -452,6 +458,50 @@ const program = Effect.gen(function* () {
     }),
   );
 
+  const emitPostLoadReplayToolLifecycleNotifications = (requestedSessionId: string) => {
+    const replayMeta = emitPostLoadReplayToolLifecycleUnstamped
+      ? {}
+      : { _meta: { isReplay: true } };
+    const toolCallId = "post-load-replay-tool-1";
+
+    writeJsonRpcNotification("session/update", {
+      ...replayMeta,
+      sessionId: requestedSessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title: "Post-load replay tool",
+        kind: "execute",
+        status: "pending",
+        rawInput: { command: ["echo", "post-load replay"] },
+        content: [
+          {
+            type: "content",
+            content: { type: "text", text: "post-load replay" },
+          },
+        ],
+        locations: [{ path: "post-load-replay.txt", line: 1 }],
+      },
+    });
+    writeJsonRpcNotification("session/update", {
+      ...replayMeta,
+      sessionId: requestedSessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "completed",
+        rawOutput: { result: "post-load replay complete" },
+        content: [
+          {
+            type: "content",
+            content: { type: "text", text: "post-load replay complete" },
+          },
+        ],
+        locations: [{ path: "post-load-replay.txt", line: 1 }],
+      },
+    });
+  };
+
   yield* agent.handlePrompt((request) =>
     Effect.gen(function* () {
       const requestedSessionId = String(request.sessionId ?? sessionId);
@@ -578,6 +628,82 @@ const program = Effect.gen(function* () {
         });
 
         return yield* Effect.never;
+      }
+
+      if (gjcTaskLifecycleMode !== undefined) {
+        const toolCallId = "gjc-task-batch-1";
+        const requestedTaskIds = ["requested-a", "requested-b"];
+        const malformed = gjcTaskLifecycleMode === "malformed";
+
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          _meta: malformed
+            ? { gjc: {} }
+            : {
+                gjc: {
+                  agentName: "batch-agent",
+                  requestedTaskIds,
+                  subagentCount: requestedTaskIds.length,
+                },
+              },
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId,
+            title: "GJC task batch",
+            kind: "execute",
+            status: "pending",
+            rawInput: malformed ? {} : { command: ["gjc-task-batch", ...requestedTaskIds] },
+          },
+        });
+
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          _meta: { gjc: {} },
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            status: "in_progress",
+          },
+        });
+
+        const terminalMeta = malformed
+          ? { gjc: {} }
+          : gjcTaskLifecycleMode === "completed"
+            ? {
+                gjc: {
+                  requestedTaskIds,
+                  agentIds: ["allocated-a", "allocated-b"],
+                  subagentCount: requestedTaskIds.length,
+                },
+              }
+            : gjcTaskLifecycleMode === "partial"
+              ? {
+                  gjc: {
+                    requestedTaskIds,
+                    agentIds: ["allocated-a"],
+                    subagentCount: requestedTaskIds.length,
+                    reason: gjcTaskLifecycleReason,
+                  },
+                }
+              : {
+                  gjc: {
+                    requestedTaskIds,
+                    subagentCount: requestedTaskIds.length,
+                    reason: gjcTaskLifecycleReason,
+                  },
+                };
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          _meta: terminalMeta,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            status: "completed",
+            rawOutput: { result: "gjc task batch settled" },
+          },
+        });
+
+        return { stopReason: "end_turn" };
       }
 
       if (emitInterleavedAssistantToolCalls) {
@@ -844,6 +970,10 @@ const program = Effect.gen(function* () {
           },
         });
         return { stopReason: "end_turn" };
+      }
+
+      if (emitPostLoadReplayToolLifecycle || emitPostLoadReplayToolLifecycleUnstamped) {
+        emitPostLoadReplayToolLifecycleNotifications(requestedSessionId);
       }
 
       yield* agent.client.sessionUpdate({

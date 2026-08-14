@@ -399,6 +399,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
     isComplete: boolean;
   } | null;
   isRunning: boolean;
+  canSteer?: boolean;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
   isSendBusy: boolean;
@@ -426,6 +427,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         compact={props.compact}
         pendingAction={props.pendingAction}
         isRunning={props.isRunning}
+        canSteer={props.canSteer ?? false}
         showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
         promptHasText={props.promptHasText}
         isSendBusy={props.isSendBusy}
@@ -508,6 +510,7 @@ export interface ChatComposerProps {
 
   // Session phase
   phase: SessionPhase;
+  canSteer: boolean;
   isConnecting: boolean;
   isSendBusy: boolean;
   sendDisabledReason: string | null;
@@ -615,6 +618,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     forceExpandedOnMobile,
     projectSelectionRequired,
     phase,
+    canSteer,
     isConnecting,
     isSendBusy,
     sendDisabledReason,
@@ -1232,15 +1236,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [activePendingIsResponding, activePendingProgress, activePendingResolvedAnswers],
   );
   const collapsedComposerPrimaryActionDisabled =
-    phase === "running" ||
-    isSendBusy ||
+    (phase === "running" && !canSteer) ||
+    (isSendBusy && !canSteer) ||
     isSendDisabled ||
     isConnecting ||
     noProviderAvailable ||
     projectSelectionRequired ||
     environmentUnavailable !== null ||
     !composerSendState.hasSendableContent;
-  const collapsedComposerPrimaryActionLabel = "Send message";
+  const collapsedComposerPrimaryActionLabel = canSteer ? "Steer current turn" : "Send message";
   const showMobilePendingAnswerActions =
     isMobileViewport && !isComposerCollapsedMobile && pendingPrimaryAction !== null;
 
@@ -3064,6 +3068,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     compact
                     pendingAction={pendingPrimaryAction}
                     isRunning={false}
+                    canSteer={canSteer}
                     showPlanFollowUpPrompt={false}
                     promptHasText={false}
                     isSendBusy={isSendBusy}
@@ -3188,6 +3193,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   activeThreadProviderDisplayName={activeThreadProviderDisplayName}
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
+                  canSteer={canSteer}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
                   promptHasText={prompt.trim().length > 0}
                   isSendBusy={isSendBusy}

@@ -29,6 +29,7 @@ import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
+
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
@@ -56,6 +57,7 @@ type ProviderIntentEvent = Extract<
       | "thread.runtime-mode-set"
       | "thread.turn-start-requested"
       | "thread.turn-interrupt-requested"
+      | "thread.turn-steer-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
       | "thread.session-stop-requested";
@@ -343,6 +345,7 @@ const make = Effect.gen(function* () {
     readonly kind:
       | "provider.turn.start.failed"
       | "provider.turn.interrupt.failed"
+      | "provider.turn.steer.failed"
       | "provider.approval.respond.failed"
       | "provider.user-input.respond.failed"
       | "provider.session.stop.failed";
@@ -378,13 +381,28 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  const sanitizeProviderFailureDetail = (provider: string, detail: string): string => {
+    // Authentication-failure classification already happens at the adapter
+    // boundary (AcpAdapterSupport.safeAcpFailureDetail maps a proven ACP auth
+    // failure to GJC_AUTHENTICATION_FAILURE_MESSAGE). Never rewrite a generic
+    // detail here based on a broad keyword match — "token budget exceeded"
+    // is not an auth failure. Only redact secret-looking material.
+    void provider;
+    return detail
+      .replace(/(bearer\s+)[^\s]+/gi, "$1[redacted]")
+      .replace(
+        /((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi,
+        "$1[redacted]",
+      );
+  };
+
   const formatFailureDetail = (cause: Cause.Cause<unknown>): string => {
     const failReason = cause.reasons.find(Cause.isFailReason);
     const providerError = isProviderAdapterRequestError(failReason?.error)
       ? failReason.error
       : undefined;
     if (providerError) {
-      return providerError.detail;
+      return sanitizeProviderFailureDetail(String(providerError.provider), providerError.detail);
     }
     return Cause.pretty(cause);
   };
@@ -1207,6 +1225,97 @@ const make = Effect.gen(function* () {
     yield* providerService.interruptTurn({ threadId: event.payload.threadId });
   });
 
+  const processTurnSteerRequested = Effect.fn("processTurnSteerRequested")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.turn-steer-requested" }>,
+  ) {
+    const thread = yield* resolveThread(event.payload.threadId);
+    if (!thread?.session || thread.session.status === "stopped") {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.steer.failed",
+        summary: "Provider turn steer failed",
+        detail: "No active provider session is bound to this thread.",
+        turnId: event.payload.turnId ?? null,
+        createdAt: event.payload.createdAt,
+      });
+    }
+    if (
+      thread.session.status !== "running" ||
+      event.payload.turnId === undefined ||
+      thread.session.activeTurnId !== event.payload.turnId
+    ) {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.steer.failed",
+        summary: "Provider turn steer failed",
+        detail: `Stale steer turn '${event.payload.turnId ?? "missing"}'; live turn is '${thread.session.activeTurnId ?? "none"}'.`,
+        turnId: event.payload.turnId ?? null,
+        createdAt: event.payload.createdAt,
+      });
+    }
+    const providerInstanceId = thread.session.providerInstanceId;
+    if (providerInstanceId === undefined) {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.steer.failed",
+        summary: "Provider turn steer failed",
+        detail: "No provider adapter instance is bound to this thread.",
+        turnId: event.payload.turnId ?? null,
+        createdAt: event.payload.createdAt,
+      });
+    }
+    const capabilities = yield* providerService.getCapabilities(providerInstanceId).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider steer capability lookup failed", {
+          threadId: event.payload.threadId,
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as(null)),
+      ),
+    );
+    if (capabilities === null || capabilities.steer !== "supported") {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.steer.failed",
+        summary: "Provider turn steer failed",
+        detail: "The bound provider adapter does not support steering.",
+        turnId: event.payload.turnId ?? null,
+        createdAt: event.payload.createdAt,
+      });
+    }
+    const steerTurn = providerService.steerTurn;
+    if (steerTurn === undefined) {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.steer.failed",
+        summary: "Provider turn steer failed",
+        detail: "Provider service has no steerTurn implementation.",
+        turnId: event.payload.turnId ?? null,
+        createdAt: event.payload.createdAt,
+      });
+    }
+    yield* steerTurn({
+      threadId: event.payload.threadId,
+      ...(event.payload.turnId !== undefined ? { turnId: event.payload.turnId } : {}),
+      message: {
+        text: event.payload.text,
+        ...(event.payload.attachments !== undefined
+          ? { attachments: event.payload.attachments }
+          : {}),
+      },
+    }).pipe(
+      Effect.catchCause((cause) =>
+        appendProviderFailureActivity({
+          threadId: event.payload.threadId,
+          kind: "provider.turn.steer.failed",
+          summary: "Provider turn steer failed",
+          detail: formatFailureDetail(cause),
+          turnId: event.payload.turnId ?? null,
+          createdAt: event.payload.createdAt,
+        }),
+      ),
+    );
+  });
+
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.approval-response-requested" }>,
   ) {
@@ -1360,6 +1469,9 @@ const make = Effect.gen(function* () {
       case "thread.turn-interrupt-requested":
         yield* processTurnInterruptRequested(event);
         return;
+      case "thread.turn-steer-requested":
+        yield* processTurnSteerRequested(event);
+        return;
       case "thread.approval-response-requested":
         yield* processApprovalResponseRequested(event);
         return;
@@ -1405,6 +1517,7 @@ const make = Effect.gen(function* () {
         event.type === "thread.runtime-mode-set" ||
         event.type === "thread.turn-start-requested" ||
         event.type === "thread.turn-interrupt-requested" ||
+        event.type === "thread.turn-steer-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
         event.type === "thread.session-stop-requested"

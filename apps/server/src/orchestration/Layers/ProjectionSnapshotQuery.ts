@@ -20,6 +20,7 @@ import {
   type OrchestrationProposedPlan,
   type OrchestrationProject,
   type OrchestrationSession,
+  OrchestrationSessionAdapterCapabilities,
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   ModelSelection,
@@ -93,7 +94,13 @@ const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );
-const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession;
+const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession.mapFields(
+  Struct.assign({
+    adapterCapabilities: Schema.NullOr(
+      Schema.fromJsonString(OrchestrationSessionAdapterCapabilities),
+    ),
+  }),
+);
 const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
   Struct.assign({
     files: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
@@ -301,6 +308,7 @@ function mapSessionRow(
     ...(row.providerInstanceId !== null ? { providerInstanceId: row.providerInstanceId } : {}),
     runtimeMode: row.runtimeMode,
     activeTurnId: row.activeTurnId,
+    ...(row.adapterCapabilities !== null ? { adapterCapabilities: row.adapterCapabilities } : {}),
     lastError: row.lastError,
     updatedAt: row.updatedAt,
   };
@@ -593,6 +601,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           provider_thread_id AS "providerThreadId",
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
+          adapter_capabilities_json AS "adapterCapabilities",
           last_error AS "lastError",
           updated_at AS "updatedAt"
         FROM projection_thread_sessions
@@ -614,6 +623,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
+          sessions.adapter_capabilities_json AS "adapterCapabilities",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
         FROM projection_thread_sessions sessions
@@ -639,6 +649,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
+          sessions.adapter_capabilities_json AS "adapterCapabilities",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
         FROM projection_thread_sessions sessions
@@ -1036,6 +1047,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           provider_instance_id AS "providerInstanceId",
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
+          adapter_capabilities_json AS "adapterCapabilities",
           last_error AS "lastError",
           updated_at AS "updatedAt"
         FROM projection_thread_sessions

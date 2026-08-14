@@ -112,28 +112,51 @@ function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
   );
 }
 
-/**
- * Status-dependent activity line. Live rows lead with what is happening now;
+/** GJC fallback terminals carry requested ids because allocation ids were unavailable. */
+function batchTerminalText(agent: RuntimeSubagent): string | null {
+  const terminal =
+    agent.status === "completed" ||
+    agent.status === "failed" ||
+    agent.status === "cancelled" ||
+    agent.status === "interrupted";
+  if (!terminal) {
+    return null;
+  }
+  const isFallback = agent.allocatedIdsUnavailable === true || agent.reason !== undefined;
+  if (!isFallback) {
+    return null;
+  }
+  const details: string[] = [];
+  if (agent.requestedTaskIds && agent.requestedTaskIds.length > 0) {
+    details.push(`requested ids: ${agent.requestedTaskIds.join(", ")}`);
+  }
+  if (agent.allocatedIdsUnavailable === true) {
+    details.push("allocated ids unavailable");
+  }
+  if (agent.reason) {
+    details.push(`reason: ${agent.reason}`);
+  }
+  return details.length > 0 ? details.join(" · ") : null;
+}
+
+/** Status-dependent activity line. Live rows lead with what is happening now;
  * settled rows lead with the outcome. Errors are the only inline previews on
  * failed rows because they explain a red row at a glance.
  */
 function agentActivityText(agent: RuntimeSubagent): string | null {
   const live =
     agent.status === "running" || agent.status === "pending" || agent.status === "waiting";
-  if (live) {
-    return (
-      agent.progress ??
+  const primary = live
+    ? (agent.progress ??
       (agent.lastToolName ? `▸ ${agent.lastToolName}` : null) ??
       agent.result ??
-      agent.error
-    );
-  }
-  return (
-    agent.error ??
-    agent.result ??
-    agent.progress ??
-    (agent.lastToolName ? `▸ ${agent.lastToolName}` : null)
-  );
+      agent.error)
+    : (agent.error ??
+      agent.result ??
+      agent.progress ??
+      (agent.lastToolName ? `▸ ${agent.lastToolName}` : null));
+  const batch = batchTerminalText(agent);
+  return [primary, batch].filter((value): value is string => value !== null).join(" · ") || null;
 }
 
 /** Flat, non-interactive agent status line. No unfold. */
@@ -146,6 +169,7 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
       ? null
       : agent.role;
   const metadata = [
+    agent.subagentCount !== undefined ? `${agent.subagentCount} subagents` : null,
     modelLabel,
     agent.usage ? `${formatSubagentTokenCount(agent.usage.totalTokens)} tok` : "— tok",
     agent.usage?.toolUses !== undefined ? `${agent.usage.toolUses} tools` : null,

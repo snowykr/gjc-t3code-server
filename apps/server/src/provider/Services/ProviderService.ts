@@ -18,10 +18,12 @@ import type {
   ProviderRespondToUserInputInput,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
+  ChatAttachment,
   ProviderSession,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
   ThreadId,
+  TurnId,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -57,6 +59,19 @@ export interface ProviderServiceShape {
   readonly interruptTurn: (
     input: ProviderInterruptTurnInput,
   ) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
+   * Deliver a message to an already-running provider turn. Optional for
+   * legacy service test doubles; production implementations provide it.
+   */
+  readonly steerTurn?: (input: {
+    readonly threadId: ThreadId;
+    readonly turnId?: TurnId;
+    readonly message: {
+      readonly text: string;
+      readonly attachments?: ReadonlyArray<ChatAttachment>;
+    };
+  }) => Effect.Effect<void, ProviderServiceError>;
 
   /**
    * Respond to a provider approval request.

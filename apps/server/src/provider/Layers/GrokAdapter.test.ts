@@ -17,6 +17,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import {
   ApprovalRequestId,
+  EventId,
   GrokSettings,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -26,7 +27,11 @@ import {
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
-import { grokPromptSettlementBelongsToContext, makeGrokAdapter } from "./GrokAdapter.ts";
+import {
+  grokPromptSettlementBelongsToContext,
+  makeGrokAdapter,
+  makeGrokContentDeltaRuntimeEvent,
+} from "./GrokAdapter.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -88,6 +93,25 @@ const grokAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
 
 const makeTestAdapter = (binaryPath: string, options?: Parameters<typeof makeGrokAdapter>[1]) =>
   makeGrokAdapter(decodeGrokSettings({ binaryPath }), options).pipe(Effect.orDie);
+
+it("preserves reasoning stream kind on Grok content deltas", () => {
+  const event = makeGrokContentDeltaRuntimeEvent({
+    stamp: {
+      eventId: EventId.make("event-reasoning"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+    provider: ProviderDriverKind.make("grok"),
+    threadId: ThreadId.make("grok-reasoning"),
+    turnId: TurnId.make("grok-turn"),
+    text: "thinking",
+    streamKind: "reasoning_text",
+    rawPayload: { sessionUpdate: "agent_thought_chunk" },
+  });
+  assert.equal(event.type, "content.delta");
+  if (event.type === "content.delta") {
+    assert.equal(event.payload.streamKind, "reasoning_text");
+  }
+});
 
 it("requires a settlement to match the live Grok turn", () => {
   const staleTurnId = TurnId.make("stale-turn");

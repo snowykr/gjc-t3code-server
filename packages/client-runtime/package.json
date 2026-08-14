@@ -139,6 +139,10 @@
       "types": "./src/state/threadSettled.ts",
       "default": "./src/state/threadSettled.ts"
     },
+    "./state/thread-state": {
+      "types": "./src/state/threadState.ts",
+      "default": "./src/state/threadState.ts"
+    },
     "./state/thread-search": {
       "types": "./src/state/threadSearch.ts",
       "default": "./src/state/threadSearch.ts"

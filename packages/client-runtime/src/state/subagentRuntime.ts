@@ -56,10 +56,22 @@ export interface SubagentRunHandles {
   readonly sessionUrl?: string;
 }
 
+export type RuntimeSubagentBatchReason =
+  | "scheduling_failed"
+  | "invalid_request"
+  | "no_allocated_agent_ids";
+
 export interface RuntimeSubagent {
   readonly id: string;
   readonly kind: "subagent" | "workflow" | "workflow_agent";
   readonly title: string;
+  /** GJC task-batch identity and allocation metadata (when present). */
+  readonly agentName?: string;
+  readonly requestedTaskIds?: ReadonlyArray<string>;
+  readonly agentIds?: ReadonlyArray<string>;
+  readonly subagentCount?: number;
+  readonly allocatedIdsUnavailable?: boolean;
+  readonly reason?: RuntimeSubagentBatchReason;
   readonly role: string | null;
   readonly model: string | null;
   readonly effort: string | null;
@@ -146,6 +158,29 @@ function asCount(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+function asStringArray(value: unknown): ReadonlyArray<string> | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const values: string[] = [];
+  for (const entry of value) {
+    const parsed = asString(entry);
+    if (parsed === undefined) {
+      return undefined;
+    }
+    values.push(parsed);
+  }
+  return values;
+}
+
+function asBatchReason(value: unknown): RuntimeSubagentBatchReason | undefined {
+  return value === "scheduling_failed" ||
+    value === "invalid_request" ||
+    value === "no_allocated_agent_ids"
+    ? value
+    : undefined;
+}
+
 function asUsage(value: unknown): SubagentUsage | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
@@ -229,6 +264,12 @@ interface MutableAgent {
   id: string;
   kind: RuntimeSubagent["kind"];
   title: string;
+  agentName?: string;
+  requestedTaskIds?: ReadonlyArray<string>;
+  agentIds?: ReadonlyArray<string>;
+  subagentCount?: number;
+  allocatedIdsUnavailable?: boolean;
+  reason?: RuntimeSubagentBatchReason;
   role: string | null;
   model: string | null;
   effort: string | null;
@@ -282,7 +323,8 @@ function getOrCreate(
   const created: MutableAgent = {
     id,
     kind: kindFromPayload(payload, id),
-    title: asString(payload.title) ?? asString(payload.detail) ?? id,
+    title:
+      asString(payload.title) ?? asString(payload.description) ?? asString(payload.detail) ?? id,
     role: asString(payload.role) ?? null,
     model: asString(payload.model) ?? null,
     effort: asString(payload.effort) ?? null,
@@ -314,8 +356,29 @@ function getOrCreate(
 
 /** Metadata fill from any payload: never downgrades known values to null. */
 function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): void {
+  const agentName = asString(payload.agentName);
+  if (agentName) {
+    agent.agentName = agentName;
+    agent.title = agentName;
+  }
   const title = asString(payload.title);
-  if (title) agent.title = title;
+  if (title && agent.agentName === undefined) agent.title = title;
+  const description = asString(payload.description);
+  if (description && agent.agentName === undefined && agent.title === agent.id) {
+    agent.title = description;
+  }
+  const requestedTaskIds = asStringArray(payload.requestedTaskIds);
+  if (requestedTaskIds !== undefined) agent.requestedTaskIds = requestedTaskIds;
+  const agentIds = asStringArray(payload.agentIds);
+  if (agentIds !== undefined) agent.agentIds = agentIds;
+  const subagentCount = asCount(payload.subagentCount);
+  if (subagentCount !== undefined) agent.subagentCount = subagentCount;
+  if (typeof payload.allocatedIdsUnavailable === "boolean") {
+    agent.allocatedIdsUnavailable = payload.allocatedIdsUnavailable;
+  }
+  const reason = asBatchReason(payload.reason);
+  if (reason !== undefined) agent.reason = reason;
+
   const role = asString(payload.role);
   if (role) agent.role = role;
   const model = asString(payload.model);

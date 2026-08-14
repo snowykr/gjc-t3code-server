@@ -107,6 +107,56 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.questions[0]?.options).toHaveLength(2);
   });
 
+  it("round-trips optional GJC task linkage fields", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "task.started",
+      eventId: "event-gjc-task-started",
+      provider: "gjc",
+      sessionId: "gjc-session",
+      threadId: "thread-gjc",
+      createdAt: "2026-08-13T00:00:00.000Z",
+      payload: {
+        taskId: "tool-call-1",
+        description: "custom-agent",
+        agentName: "custom-agent",
+        requestedTaskIds: ["requested-a", "requested-b"],
+        subagentCount: 2,
+      },
+    });
+
+    expect(parsed.type).toBe("task.started");
+    if (parsed.type !== "task.started") {
+      throw new Error("expected task.started");
+    }
+    expect(parsed.payload.agentName).toBe("custom-agent");
+    expect(parsed.payload.requestedTaskIds).toEqual(["requested-a", "requested-b"]);
+    expect(parsed.payload.subagentCount).toBe(2);
+
+    const completed = decodeRuntimeEvent({
+      type: "task.completed",
+      eventId: "event-gjc-task-completed",
+      provider: "gjc",
+      sessionId: "gjc-session",
+      threadId: "thread-gjc",
+      createdAt: "2026-08-13T00:00:01.000Z",
+      payload: {
+        taskId: "tool-call-1",
+        status: "failed",
+        requestedTaskIds: ["requested-a", "requested-b"],
+        subagentCount: 2,
+        allocatedIdsUnavailable: true,
+        reason: "scheduling_failed",
+      },
+    });
+
+    expect(completed.type).toBe("task.completed");
+    if (completed.type !== "task.completed") {
+      throw new Error("expected task.completed");
+    }
+    expect(completed.payload.allocatedIdsUnavailable).toBe(true);
+    expect(completed.payload.reason).toBe("scheduling_failed");
+  });
+
   it("decodes user-input.resolved with answer map", () => {
     const parsed = decodeRuntimeEvent({
       type: "user-input.resolved",

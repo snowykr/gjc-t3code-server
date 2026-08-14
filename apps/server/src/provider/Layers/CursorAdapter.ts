@@ -310,6 +310,12 @@ function selectAutoApprovedPermissionOption(
   return undefined;
 }
 
+export function makeCursorContentDeltaRuntimeEvent(
+  input: Parameters<typeof makeAcpContentDeltaEvent>[0],
+): ProviderRuntimeEvent {
+  return makeAcpContentDeltaEvent(input);
+}
+
 export function makeCursorAdapter(
   cursorSettings: CursorSettings,
   options?: CursorAdapterLiveOptions,
@@ -856,13 +862,14 @@ export function makeCursorAdapter(
                       "acp.jsonrpc",
                     );
                     yield* offerRuntimeEvent(
-                      makeAcpContentDeltaEvent({
+                      makeCursorContentDeltaRuntimeEvent({
                         stamp: yield* makeEventStamp(),
                         provider: PROVIDER,
                         threadId: ctx.threadId,
                         turnId: ctx.activeTurnId,
                         ...(event.itemId ? { itemId: event.itemId } : {}),
                         text: event.text,
+                        ...(event.streamKind ? { streamKind: event.streamKind } : {}),
                         rawPayload: event.rawPayload,
                       }),
                     );

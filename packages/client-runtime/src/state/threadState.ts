@@ -38,3 +38,32 @@ export function threadHasOlderTurns(state: EnvironmentThreadState): boolean {
     onSome: (page) => page.hasMore,
   });
 }
+
+/**
+ * Whether a thread can accept a message without starting a new turn.
+ *
+ * Both the detail state and shell projections carry the session capability,
+ * so this selector also accepts the thread-like subset used by UI surfaces.
+ * Missing capability facts fail closed for legacy sessions.
+ */
+export function threadCanSteer(
+  state:
+    | EnvironmentThreadState
+    | Pick<OrchestrationThread, "session" | "latestTurn">
+    | null
+    | undefined,
+): boolean {
+  const thread = state && "data" in state ? Option.getOrNull(state.data) : state;
+  const session = thread?.session;
+  const latestTurn = thread?.latestTurn;
+  return (
+    session?.status === "running" &&
+    session.activeTurnId !== null &&
+    session.activeTurnId !== undefined &&
+    latestTurn !== null &&
+    latestTurn !== undefined &&
+    latestTurn.state === "running" &&
+    latestTurn.turnId === session.activeTurnId &&
+    session.adapterCapabilities?.steer === "supported"
+  );
+}

@@ -2470,6 +2470,185 @@ describe("ProviderRuntimeIngestion", () => {
     expect(finalMessage?.streaming).toBe(false);
   });
 
+  it("persists reasoning progress cumulatively and flushes it on turn completion", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-reasoning-progress");
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-reasoning-progress"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-progress-one"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { streamKind: "reasoning_text", delta: "first " },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-progress-two"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { streamKind: "reasoning_summary_text", delta: "thought" },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-reasoning-progress-complete"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { state: "completed" },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "reasoning.progress"),
+    );
+    const activity = thread.activities.find((entry) => entry.kind === "reasoning.progress");
+    expect(activity).toMatchObject({
+      id: "reasoning-progress:thread-1:turn-reasoning-progress",
+      tone: "info",
+      turnId,
+      payload: { detail: "first thought" },
+    });
+  });
+
+  it("persists Claude reasoning_text through the same ingestion writer", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-claude-reasoning");
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-claude-reasoning"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { streamKind: "reasoning_text", delta: "Claude thought" },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-claude-reasoning-complete"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { state: "completed" },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "reasoning.progress"),
+    );
+    expect(
+      thread.activities.find((activity) => activity.kind === "reasoning.progress")?.payload,
+    ).toEqual({
+      detail: "Claude thought",
+    });
+  });
+
+  it("cumulatively merges multiple reasoning spills and persists buffered text on session exit", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-reasoning-spill");
+    const now = "2026-01-01T00:00:00.000Z";
+    const first = "a".repeat(24_001);
+    const second = "b".repeat(24_001);
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-reasoning-spill"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-spill-one"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { streamKind: "reasoning_text", delta: first },
+    });
+    await waitForThread(harness.readModel, (thread) => {
+      const activity = thread.activities.find((entry) => entry.kind === "reasoning.progress");
+      return (
+        typeof activity?.payload === "object" &&
+        activity.payload !== null &&
+        (activity.payload as { detail?: unknown }).detail === first
+      );
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-spill-two"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { streamKind: "reasoning_text", delta: second },
+    });
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-reasoning-spill-exit"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) => {
+      const activity = entry.activities.find((item) => item.kind === "reasoning.progress");
+      return (
+        typeof activity?.payload === "object" &&
+        activity.payload !== null &&
+        (activity.payload as { detail?: unknown }).detail === `${first}${second}`
+      );
+    });
+    const activity = thread.activities.find((entry) => entry.kind === "reasoning.progress");
+    expect((activity?.payload as { detail: string }).detail).toBe(`${first}${second}`);
+  });
+
+  it("renders persisted reasoning activity after a fresh ingestion session reads the projection", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-reasoning-cold-reopen");
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-cold-reopen"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { streamKind: "reasoning_text", delta: "persisted reasoning" },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-reasoning-cold-reopen-complete"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { state: "completed" },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "reasoning.progress"),
+    );
+    expect(
+      thread.activities.find((activity) => activity.kind === "reasoning.progress"),
+    ).toBeDefined();
+  });
+
   it("spills oversized buffered deltas and still finalizes full assistant text", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -3164,6 +3343,9 @@ describe("ProviderRuntimeIngestion", () => {
       payload: {
         taskId: "turn-task-1",
         taskType: "plan",
+        agentName: "batch-agent",
+        requestedTaskIds: ["requested-a", "requested-b"],
+        subagentCount: 2,
       },
     });
 
@@ -3192,6 +3374,10 @@ describe("ProviderRuntimeIngestion", () => {
         taskId: "turn-task-1",
         status: "completed",
         summary: "<proposed_plan>\n# Plan title\n</proposed_plan>",
+        agentName: "batch-agent",
+        requestedTaskIds: ["requested-a", "requested-b"],
+        agentIds: ["allocated-a", "allocated-b"],
+        subagentCount: 2,
       },
     });
     harness.emit({
@@ -3240,18 +3426,87 @@ describe("ProviderRuntimeIngestion", () => {
 
     expect(started?.kind).toBe("task.started");
     expect(started?.summary).toBe("Plan task started");
+    expect(started?.payload).toMatchObject({
+      agentName: "batch-agent",
+      requestedTaskIds: ["requested-a", "requested-b"],
+      subagentCount: 2,
+    });
     expect(progress?.kind).toBe("task.progress");
     expect(progressPayload?.detail).toBe("Code reviewer is validating the desktop rollout chunks.");
     expect(progressPayload?.summary).toBe(
       "Code reviewer is validating the desktop rollout chunks.",
     );
     expect(completed?.kind).toBe("task.completed");
+    expect(completed?.payload).toMatchObject({
+      agentName: "batch-agent",
+      requestedTaskIds: ["requested-a", "requested-b"],
+      agentIds: ["allocated-a", "allocated-b"],
+      subagentCount: 2,
+    });
     expect(completedPayload?.detail).toBe("<proposed_plan>\n# Plan title\n</proposed_plan>");
     expect(
       thread.proposedPlans.find(
         (entry: ProviderRuntimeTestProposedPlan) => entry.id === "plan:thread-1:turn:turn-task-1",
       )?.planMarkdown,
     ).toBe("# Plan title");
+  });
+
+  it("persists GJC task linkage fields through normal task lifecycle rows", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-gjc-fallback-started"),
+      provider: ProviderDriverKind.make("gjc"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-gjc-fallback"),
+      payload: {
+        taskId: "gjc-fallback-task",
+        taskType: "subagent",
+        agentName: "fallback-agent",
+        requestedTaskIds: ["requested-fallback-a", "requested-fallback-b"],
+        subagentCount: 2,
+      },
+    });
+
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("evt-gjc-fallback-completed"),
+      provider: ProviderDriverKind.make("gjc"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-gjc-fallback"),
+      payload: {
+        taskId: "gjc-fallback-task",
+        taskType: "subagent",
+        status: "stopped",
+        agentName: "fallback-agent",
+        requestedTaskIds: ["requested-fallback-a", "requested-fallback-b"],
+        subagentCount: 2,
+        allocatedIdsUnavailable: true,
+        reason: "no_allocated_agent_ids",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-gjc-fallback-completed",
+      ),
+    );
+    const completed = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-gjc-fallback-completed",
+    );
+    expect(completed?.kind).toBe("task.completed");
+    expect(completed?.payload).toMatchObject({
+      status: "stopped",
+      agentName: "fallback-agent",
+      requestedTaskIds: ["requested-fallback-a", "requested-fallback-b"],
+      subagentCount: 2,
+      allocatedIdsUnavailable: true,
+      reason: "no_allocated_agent_ids",
+    });
   });
 
   it("titles task activities with the task description, including on completion", async () => {

@@ -1046,6 +1046,83 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.turn.steer": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const activeTurnId = thread.session?.activeTurnId;
+      const hasAttachments = command.message.attachments.length > 0;
+      const hasText = command.message.text.trim().length > 0;
+      if (
+        thread.session?.status !== "running" ||
+        activeTurnId === null ||
+        activeTurnId === undefined ||
+        thread.latestTurn === null ||
+        thread.latestTurn.state !== "running" ||
+        thread.latestTurn.turnId !== activeTurnId ||
+        (command.turnId !== undefined && command.turnId !== activeTurnId) ||
+        thread.session?.adapterCapabilities?.steer !== "supported" ||
+        thread.settledOverride === "settled" ||
+        thread.snoozedAt != null ||
+        thread.snoozedUntil != null ||
+        (!hasText && !hasAttachments)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            thread.settledOverride === "settled"
+              ? "Steer is not allowed on a settled thread."
+              : thread.snoozedAt != null || thread.snoozedUntil != null
+                ? "Steer is not allowed on a snoozed thread."
+                : "Steer requires a running turn on an adapter that supports steering and non-empty text or attachments.",
+        });
+      }
+
+      const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.message-sent",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.message.messageId,
+          role: "user",
+          text: command.message.text,
+          attachments: command.message.attachments,
+          turnId: activeTurnId,
+          streaming: false,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+      const steerRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        causationEventId: userMessageEvent.eventId,
+        type: "thread.turn-steer-requested",
+        payload: {
+          threadId: command.threadId,
+          turnId: activeTurnId,
+          messageId: command.message.messageId,
+          text: command.message.text,
+          ...(command.message.attachments.length > 0
+            ? { attachments: command.message.attachments }
+            : {}),
+          createdAt: command.createdAt,
+        },
+      };
+      return [userMessageEvent, steerRequestedEvent];
+    }
+
     case "thread.approval.respond": {
       yield* requireThread({
         readModel,

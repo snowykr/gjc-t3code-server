@@ -150,6 +150,15 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
   .map((entry) => entry.trim())
   .filter((entry) => entry.length > 0);
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
+const configuredAllowedOrigins = (process.env.T3CODE_DEV_ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter((entry) => entry.length > 0);
+const allowedCorsOrigins = new Set([
+  "t3code://app",
+  "t3code-dev://app",
+  ...configuredAllowedOrigins,
+]);
 
 export default defineConfig(() => {
   return {
@@ -215,6 +224,14 @@ export default defineConfig(() => {
       port,
       strictPort: true,
       allowedHosts,
+      // The shared dev server proxies remote-environment requests. Browser
+      // navigation needs no CORS permission, but the desktop renderer fetches
+      // them from its secure custom origin. Keep Vite's preflight policy as
+      // narrow as the backend policy rather than reflecting arbitrary origins.
+      cors: {
+        origin: [...allowedCorsOrigins],
+        credentials: true,
+      },
       // Transform the whole module graph at server start instead of on the
       // first request. Without this, a cold worktree discovers and transforms
       // modules one import-level at a time while the browser waits — which

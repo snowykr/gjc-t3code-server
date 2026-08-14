@@ -44,6 +44,28 @@ function renderPendingActions(isRunning: boolean) {
   );
 }
 
+function renderStandaloneSteer() {
+  return renderToStaticMarkup(
+    createElement(ComposerPrimaryActions, {
+      compact: true,
+      pendingAction: null,
+      isRunning: true,
+      canSteer: true,
+      showPlanFollowUpPrompt: false,
+      promptHasText: true,
+      isSendBusy: false,
+      sendDisabledReason: null,
+      isConnecting: false,
+      isEnvironmentUnavailable: false,
+      isPreparingWorktree: false,
+      hasSendableContent: true,
+      onPreviousPendingQuestion: () => {},
+      onInterrupt: () => {},
+      onImplementPlanInNewThread: () => {},
+    }),
+  );
+}
+
 function renderStandaloneStop() {
   return renderToStaticMarkup(
     createElement(ComposerPrimaryActions, {
@@ -188,6 +210,18 @@ describe("ComposerPrimaryActions", () => {
 
   it("does not offer Stop generation for a pending request without a running turn", () => {
     expect(renderPendingActions(false)).not.toContain('aria-label="Stop generation"');
+  });
+
+  it("offers Steer alongside Stop for a supported running turn", () => {
+    const markup = renderStandaloneSteer();
+    expect(markup).toContain('aria-label="Stop generation"');
+    expect(markup).toContain('aria-label="Steer current turn"');
+  });
+
+  it("keeps Stop-only behavior for an unsupported running turn", () => {
+    const markup = renderStandaloneStop();
+    expect(markup).toContain('aria-label="Stop generation"');
+    expect(markup).not.toContain('aria-label="Steer current turn"');
   });
 
   it("matches the small pending action size without changing the standalone size", () => {

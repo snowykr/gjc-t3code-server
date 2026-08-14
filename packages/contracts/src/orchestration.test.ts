@@ -20,6 +20,8 @@ import {
   ProjectCreateCommand,
   ThreadMetaUpdatedPayload,
   ThreadTurnStartCommand,
+  ThreadTurnSteerCommand,
+  ThreadTurnSteerRequestedPayload,
   ThreadCreatedPayload,
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
@@ -33,8 +35,12 @@ const decodeProjectCreateCommand = Schema.decodeUnknownEffect(ProjectCreateComma
 const decodeProjectCreatedPayload = Schema.decodeUnknownEffect(ProjectCreatedPayload);
 const decodeProjectMetaUpdatedPayload = Schema.decodeUnknownEffect(ProjectMetaUpdatedPayload);
 const decodeThreadTurnStartCommand = Schema.decodeUnknownEffect(ThreadTurnStartCommand);
+const decodeThreadTurnSteerCommand = Schema.decodeUnknownEffect(ThreadTurnSteerCommand);
 const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
   ThreadTurnStartRequestedPayload,
+);
+const decodeThreadTurnSteerRequestedPayload = Schema.decodeUnknownEffect(
+  ThreadTurnSteerRequestedPayload,
 );
 const decodeOrchestrationLatestTurn = Schema.decodeUnknownEffect(OrchestrationLatestTurn);
 const decodeOrchestrationProposedPlan = Schema.decodeUnknownEffect(OrchestrationProposedPlan);
@@ -53,6 +59,38 @@ const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPaylo
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
+
+it.effect("round-trips a steer command and intent payload", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeThreadTurnSteerCommand({
+      type: "thread.turn.steer",
+      commandId: "cmd-steer",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      message: {
+        messageId: "message-steer",
+        role: "user",
+        text: "Use the smaller implementation.",
+        attachments: [],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(command.type, "thread.turn.steer");
+    assert.strictEqual(command.message.text, "Use the smaller implementation.");
+    const payload = yield* decodeThreadTurnSteerRequestedPayload({
+      threadId: command.threadId,
+      turnId: command.turnId,
+      messageId: command.message.messageId,
+      text: command.message.text,
+      createdAt: command.createdAt,
+    });
+    assert.strictEqual(String(payload.threadId), "thread-1");
+    assert.strictEqual(String(payload.turnId), "turn-1");
+    assert.strictEqual(String(payload.messageId), "message-steer");
+    assert.strictEqual(payload.text, "Use the smaller implementation.");
+    assert.strictEqual(payload.createdAt, "2026-01-01T00:00:00.000Z");
+  }),
+);
 
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   Effect.gen(function* () {

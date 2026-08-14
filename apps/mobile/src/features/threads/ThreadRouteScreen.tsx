@@ -786,6 +786,7 @@ function ThreadRouteContent(
           threadSyncStatus={selectedThreadDetailState.status}
           loadEarlier={loadEarlierTurns}
           activeThreadBusy={composer.activeThreadBusy}
+          canSteer={composer.canSteer}
           environmentId={selectedThread.environmentId}
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}

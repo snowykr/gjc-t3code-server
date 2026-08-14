@@ -211,6 +211,28 @@ export const GrokIcon: Icon = ({ className, ...props }) => (
   </svg>
 );
 
+export const GjcIcon: Icon = ({ className, ...props }) => (
+  <svg
+    {...props}
+    viewBox="0 0 24 24"
+    fill="none"
+    className={cn("fill-[#0F0F0F] dark:fill-[#F5F5F5]", className)}
+  >
+    {/* GJC monogram: a rounded square with a G-gesture mark */}
+    <rect
+      x="2.5"
+      y="2.5"
+      width="19"
+      height="19"
+      rx="4"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      fill="none"
+    />
+    <path d="M9 10.2C9 8.6 10.1 7.6 12 7.6C13.7 7.6 14.8 8.5 14.9 9.9H13.3C13.2 9.1 12.7 8.8 12 8.8C11.2 8.8 10.7 9.2 10.7 10.2C10.7 11.1 11.2 11.5 12 11.5C12.6 11.5 13 11.3 13.4 10.9H14.9C14.6 12.5 13.5 13.4 12 13.4C10.1 13.4 9 12.4 9 10.2Z" />
+  </svg>
+);
+
 export const TraeIcon: Icon = (props) => (
   <svg {...props} viewBox="0 0 24 24" fill="currentColor">
     {/* Back rectangle: left strip + bottom strip drawn separately — empty bottom-left corner is the gap between them */}

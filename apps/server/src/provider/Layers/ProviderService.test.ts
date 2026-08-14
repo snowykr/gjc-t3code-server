@@ -128,9 +128,18 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
         );
       }
 
-      return Effect.succeed({
-        threadId: input.threadId,
-        turnId: TurnId.make(`turn-${String(input.threadId)}`),
+      const turnId = TurnId.make(`turn-${String(input.threadId)}`);
+      return Effect.sync(() => {
+        const session = sessions.get(input.threadId);
+        if (session) {
+          sessions.set(input.threadId, {
+            ...session,
+            status: "running",
+            activeTurnId: turnId,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          });
+        }
+        return { threadId: input.threadId, turnId };
       });
     },
   );
@@ -937,6 +946,71 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(startPayload.threadId, session.threadId);
       }
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("fails steering when the adapter does not support steering", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-steer-unsupported");
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* provider.sendTurn({ threadId, input: "hello", attachments: [] });
+
+      const failure = yield* Effect.flip(
+        provider.steerTurn!({
+          threadId,
+          turnId: turn.turnId,
+          message: { text: "continue" },
+        }),
+      );
+      assert.instanceOf(failure, ProviderAdapterRequestError);
+      assert.equal(failure.detail, "Provider adapter does not support steering.");
+
+      const capabilities = routing.codex.adapter.capabilities as unknown as Record<string, unknown>;
+      capabilities.steer = "supported";
+      const missingMethodFailure = yield* Effect.flip(
+        provider.steerTurn!({
+          threadId,
+          turnId: turn.turnId,
+          message: { text: "continue" },
+        }),
+      );
+      assert.instanceOf(missingMethodFailure, ProviderAdapterRequestError);
+      assert.equal(missingMethodFailure.detail, "Provider adapter does not implement steering.");
+      delete capabilities.steer;
+    }),
+  );
+
+  it.effect("does not recover or send when steering a dead session binding", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-steer-dead");
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* provider.sendTurn({ threadId, input: "hello", attachments: [] });
+      yield* routing.codex.stopSession(threadId);
+      routing.codex.startSession.mockClear();
+      routing.codex.sendTurn.mockClear();
+
+      const failure = yield* Effect.flip(
+        provider.steerTurn!({
+          threadId,
+          turnId: turn.turnId,
+          message: { text: "continue" },
+        }),
+      );
+      assert.instanceOf(failure, ProviderValidationError);
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
     }),
   );
 

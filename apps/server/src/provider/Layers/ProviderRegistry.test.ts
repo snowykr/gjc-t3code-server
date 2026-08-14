@@ -600,6 +600,44 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         ]);
       });
 
+      it("drops stale GJC models missing from an authoritative ACP refresh", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("gjc"),
+          driver: ProviderDriverKind.make("gjc"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "unknown" },
+          checkedAt: "2026-08-14T00:00:00.000Z",
+          version: "0.13.1",
+          models: [
+            {
+              slug: "gjc",
+              name: "GJC",
+              isCustom: false,
+              capabilities: null,
+            },
+            {
+              slug: "openai-codex/gpt-5",
+              name: "GPT-5",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const refreshedProvider = {
+          ...previousProvider,
+          checkedAt: "2026-08-14T00:01:00.000Z",
+          models: [previousProvider.models[1]],
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
+          ...refreshedProvider.models,
+        ]);
+      });
+
       it("drops stale OpenCode models missing from a successful refresh", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("opencode"),
@@ -1554,6 +1592,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                   claudeAgent: { enabled: false },
                   cursor: { enabled: false },
                   grok: { enabled: false },
+                  gjc: { enabled: false },
                   opencode: { enabled: false },
                 },
               }),
@@ -1806,6 +1845,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 "claudeAgent",
                 "codex",
                 "cursor",
+                "gjc",
                 "grok",
                 "opencode",
               ]);

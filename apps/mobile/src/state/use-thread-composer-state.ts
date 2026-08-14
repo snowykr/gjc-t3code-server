@@ -1,9 +1,11 @@
 import { useAtomValue } from "@effect/atom-react";
+import * as Cause from "effect/Cause";
 import { useCallback, useEffect, useMemo } from "react";
 
 import {
   CommandId,
   MessageId,
+  type ChatAttachment,
   type EnvironmentId,
   type ModelSelection,
   type ProviderInteractionMode,
@@ -11,6 +13,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
+import { threadCanSteer } from "@t3tools/client-runtime/state/thread-state";
 import { deriveActiveWorkStartedAt } from "@t3tools/shared/orchestrationTiming";
 
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
@@ -41,6 +44,8 @@ import { useSelectedThreadDetail } from "../state/use-thread-detail";
 import { useThreadSelection } from "../state/use-thread-selection";
 import { enqueueThreadOutboxMessage } from "./thread-outbox";
 import { useThreadOutboxMessages } from "./use-thread-outbox";
+import { threadEnvironment } from "./threads";
+import { useAtomCommand } from "./use-atom-command";
 
 export function appendReviewCommentToDraft(input: {
   readonly environmentId: EnvironmentId;
@@ -74,10 +79,11 @@ export function useThreadDraftForThread(input: {
 }
 
 export function useThreadComposerState() {
-  const { selectedThread: selectedThreadShell } = useThreadSelection();
+  const { selectedThread: selectedThreadShell, selectedEnvironmentRuntime } = useThreadSelection();
   const selectedThreadDetail = useSelectedThreadDetail();
   const composerDrafts = useAtomValue(composerDraftsAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
+  const steerThreadTurn = useAtomCommand(threadEnvironment.steerTurn, { reportFailure: false });
 
   useEffect(() => {
     ensureComposerDraftsLoaded();
@@ -149,6 +155,45 @@ export function useThreadComposerState() {
 
     const metadata = makeQueuedMessageMetadata();
     const messageId = MessageId.make(metadata.messageId);
+    if (
+      threadCanSteer(thread) &&
+      selectedEnvironmentRuntime?.connectionState === "connected" &&
+      thread.session?.activeTurnId
+    ) {
+      const steerResult = await steerThreadTurn({
+        environmentId: selectedThreadShell.environmentId,
+        input: {
+          threadId: selectedThreadShell.id,
+          turnId: thread.session.activeTurnId,
+          message: {
+            messageId,
+            role: "user",
+            text,
+            attachments: attachments.map(
+              (attachment): ChatAttachment => ({
+                type: "image",
+                id: attachment.id as ChatAttachment["id"],
+                name: attachment.name,
+                mimeType: attachment.mimeType,
+                sizeBytes: attachment.sizeBytes,
+              }),
+            ),
+          },
+          createdAt: metadata.createdAt,
+        },
+      });
+      if (steerResult._tag === "Failure") {
+        const error = Cause.squash(steerResult.cause);
+        setPendingConnectionError(
+          error instanceof Error ? error.message : "Failed to steer the current turn.",
+        );
+        return null;
+      }
+      clearComposerDraftContent(threadKey);
+      setPendingConnectionError(null);
+      return messageId;
+    }
+
     // Enqueue publishes the queued atom synchronously (the durable write
     // happens behind it), so clearing the draft here gives send feedback on
     // the tap frame instead of after file I/O. If the write fails the message
@@ -179,7 +224,7 @@ export function useThreadComposerState() {
       );
     });
     return messageId;
-  }, [selectedThreadDetail, selectedThreadShell]);
+  }, [selectedEnvironmentRuntime, selectedThreadDetail, selectedThreadShell, steerThreadTurn]);
 
   const onChangeDraftMessage = useCallback(
     (value: string) => {
@@ -309,6 +354,8 @@ export function useThreadComposerState() {
     runtimeMode,
     interactionMode,
     activeThreadBusy,
+    canSteer:
+      threadCanSteer(selectedThread) && selectedEnvironmentRuntime?.connectionState === "connected",
     onChangeDraftMessage,
     onPickDraftImages,
     onPasteIntoDraft,

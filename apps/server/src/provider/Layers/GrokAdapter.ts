@@ -211,6 +211,12 @@ function completedStopReasonFromPromptResponse(
   return response.stopReason;
 }
 
+export function makeGrokContentDeltaRuntimeEvent(
+  input: Parameters<typeof makeAcpContentDeltaEvent>[0],
+): ProviderRuntimeEvent {
+  return makeAcpContentDeltaEvent(input);
+}
+
 export function grokPromptSettlementBelongsToContext(input: {
   readonly liveAcpSessionId: string;
   readonly expectedAcpSessionId: string;
@@ -858,13 +864,14 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                     return;
                   case "ContentDelta":
                     yield* offerRuntimeEvent(
-                      makeAcpContentDeltaEvent({
+                      makeGrokContentDeltaRuntimeEvent({
                         stamp,
                         provider: PROVIDER,
                         threadId: ctx.threadId,
                         turnId: notificationTurnId,
                         ...(event.itemId ? { itemId: event.itemId } : {}),
                         text: event.text,
+                        ...(event.streamKind ? { streamKind: event.streamKind } : {}),
                         rawPayload: event.rawPayload,
                       }),
                     );

@@ -544,6 +544,20 @@ export function classifyTaskAgentKind(input: {
  * All fields optional: old emitters and old rows decode unchanged.
  */
 const taskAgentLinkageFields = {
+  /** Opaque agent name requested from the task tool (custom or bundled). */
+  agentName: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** Requested task ids supplied at task start. */
+  requestedTaskIds: Schema.optional(Schema.Array(TrimmedNonEmptyStringSchema)),
+  /** Allocated child-agent ids supplied at task completion. */
+  agentIds: Schema.optional(Schema.Array(TrimmedNonEmptyStringSchema)),
+  /** Number of requested or allocated child agents at this lifecycle point. */
+  subagentCount: Schema.optional(NonNegativeInt),
+  /** True when completion used requested ids because allocation ids were unavailable. */
+  allocatedIdsUnavailable: Schema.optional(Schema.Boolean),
+  /** Explicit task-batch terminal reason when allocation did not complete normally. */
+  reason: Schema.optional(
+    Schema.Literals(["scheduling_failed", "invalid_request", "no_allocated_agent_ids"]),
+  ),
   /** SDK task_type (subagent/shell/monitor/local_workflow/…), repeated on
    * every row so folds can classify without the start row. */
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
