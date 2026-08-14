@@ -77,8 +77,8 @@ const withInstanceIdentity =
 export const GjcDriver: ProviderDriver<GjcSettings, GjcDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
-    displayName: "GJC",
-    supportsMultipleInstances: false,
+    displayName: "Gajae Code",
+    supportsMultipleInstances: true,
   },
   configSchema: GjcSettings,
   defaultConfig: (): GjcSettings => decodeGjcSettings({}),

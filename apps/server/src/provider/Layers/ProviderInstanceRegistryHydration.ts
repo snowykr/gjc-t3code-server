@@ -73,21 +73,17 @@ import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistry
 export const deriveProviderInstanceConfigMap = (
   settings: ServerSettings,
 ): ProviderInstanceConfigMap => {
-  const merged: Record<string, ProviderInstanceConfig> = { ...settings.providerInstances };
+  const merged: Record<string, ProviderInstanceConfig> = {};
 
   for (const driver of BUILT_IN_DRIVERS) {
     const instanceId = defaultInstanceIdForDriver(driver.driverKind);
-    if (instanceId in merged) {
-      // Explicit `providerInstances` entry for this slot — user-authored
-      // config always wins over the legacy mirror.
+    const explicit = settings.providerInstances[instanceId];
+    if (explicit?.driver === driver.driverKind) {
+      // The Gajae Code distribution accepts only its built-in instance.
+      merged[instanceId] = explicit;
       continue;
     }
 
-    // Only built-in drivers have a legacy mirror; the registry's
-    // `providers` struct is keyed on the same literal slug as
-    // `driverKind`. Access is dynamic (the driver kind is a branded string),
-    // but it's constrained to `keyof settings.providers` by the union of
-    // built-in driver kinds.
     const legacyKey = driver.driverKind as keyof ServerSettings["providers"];
     const legacyConfig = settings.providers[legacyKey];
     if (legacyConfig === undefined) {

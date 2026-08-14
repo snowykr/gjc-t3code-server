@@ -57,15 +57,38 @@ export { resolveSourceControlWriterModelSelection } from "@t3tools/shared/server
 const encodeServerSettings = Schema.encodeEffect(ServerSettings);
 const encodeServerSettingsJson = Schema.encodeUnknownEffect(fromJsonStringPretty(ServerSettings));
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
+const GJC_DRIVER = ProviderDriverKind.make("gjc");
+const GJC_INSTANCE_ID = ProviderInstanceId.make("gjc");
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+
+function restrictToGjcSettings(settings: ServerSettings): ServerSettings {
+  const gjcInstance = settings.providerInstances[GJC_INSTANCE_ID];
+  const providerInstances = {
+    [GJC_INSTANCE_ID]:
+      gjcInstance?.driver === GJC_DRIVER
+        ? { ...gjcInstance, displayName: "Gajae Code" }
+        : {
+            driver: GJC_DRIVER,
+            displayName: "Gajae Code",
+            enabled: true,
+            config: { enabled: true, binaryPath: "gjc", customModels: [] },
+          },
+  } as ServerSettings["providerInstances"];
+
+  return {
+    ...settings,
+    providerInstances,
+  };
+}
 
 const normalizeServerSettings = (
   settings: ServerSettings,
 ): Effect.Effect<ServerSettings, ServerSettingsError> =>
   encodeServerSettings(settings).pipe(
     Effect.flatMap(decodeServerSettings),
+    Effect.map(restrictToGjcSettings),
     Effect.mapError(
       (cause) =>
         new ServerSettingsError({
@@ -98,8 +121,9 @@ function redactProviderEnvironmentVariable(
 }
 
 export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
+  const restricted = restrictToGjcSettings(settings);
   const providerInstances = Object.fromEntries(
-    Object.entries(settings.providerInstances).map(([instanceId, instance]) => [
+    Object.entries(restricted.providerInstances).map(([instanceId, instance]) => [
       instanceId,
       instance.environment
         ? {
@@ -109,7 +133,10 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
         : instance,
     ]),
   );
-  return { ...settings, providerInstances };
+  return {
+    ...restricted,
+    providerInstances: providerInstances as ServerSettings["providerInstances"],
+  };
 }
 
 export class ServerSettingsService extends Context.Service<

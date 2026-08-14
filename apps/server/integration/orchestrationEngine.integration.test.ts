@@ -110,7 +110,7 @@ function withRealCodexHarness<A, E>(
   use: (harness: OrchestrationIntegrationHarness) => Effect.Effect<A, E>,
 ) {
   return Effect.acquireUseRelease(
-    makeOrchestrationIntegrationHarness({ provider: CODEX_PROVIDER, realCodex: true }),
+    makeOrchestrationIntegrationHarness({ provider: CODEX_PROVIDER }),
     use,
     (harness) => harness.dispose,
   ).pipe(Effect.provide(NodeServices.layer));

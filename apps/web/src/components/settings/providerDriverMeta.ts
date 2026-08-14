@@ -64,7 +64,7 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
   },
   {
     value: ProviderDriverKind.make("gjc"),
-    label: "GJC",
+    label: "Gajae Code",
     icon: GjcIcon,
     badgeLabel: "Early Access",
     settingsSchema: GjcSettings,

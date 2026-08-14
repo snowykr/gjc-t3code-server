@@ -54,7 +54,7 @@ export const PROVIDER_OPTIONS: Array<{
   },
   {
     value: ProviderDriverKind.make("gjc"),
-    label: "GJC",
+    label: "Gajae Code",
     available: true,
     pickerSidebarBadge: "new",
   },

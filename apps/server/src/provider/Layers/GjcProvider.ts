@@ -39,7 +39,7 @@ import {
 } from "../acp/AcpAdapterSupport.ts";
 
 const GJC_PRESENTATION = {
-  displayName: "GJC",
+  displayName: "Gajae Code",
   badgeLabel: "Early Access",
   showInteractionModeToggle: false,
   // GJC exposes `session/set_model`, which the adapter applies before each

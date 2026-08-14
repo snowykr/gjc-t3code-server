@@ -6,8 +6,8 @@ describe("GjcDriver", () => {
   it("advertises GJC ACP metadata and defaults", () => {
     expect(GjcDriver.driverKind).toBe("gjc");
     expect(GjcDriver.metadata).toEqual({
-      displayName: "GJC",
-      supportsMultipleInstances: false,
+      displayName: "Gajae Code",
+      supportsMultipleInstances: true,
     });
     expect(GjcDriver.defaultConfig()).toMatchObject({
       enabled: true,
