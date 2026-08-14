@@ -736,11 +736,10 @@ describe("ProviderCommandReactor", () => {
     expect(lastError).not.toContain("raw-acp-secret");
   });
 
-  it("generates a thread title on the first turn", async () => {
+  it("titles the first turn from the first user message without a text-generation call", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
     const seededTitle = "Please investigate reconnect failures after restar...";
-    harness.generateThreadTitle.mockReturnValue(Effect.succeed({ title: "Generated title" }));
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -769,21 +768,21 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await waitFor(() => harness.generateThreadTitle.mock.calls.length === 1);
-    expect(harness.generateThreadTitle.mock.calls[0]?.[0]).toMatchObject({
-      message: "Please investigate reconnect failures after restarting the session.",
-    });
+    // The first-turn title is derived locally from the message text (or the
+    // client seed); no provider text-generation round-trip is started (that
+    // call was the source of multi-second first-turn delays).
+    expect(harness.generateThreadTitle).not.toHaveBeenCalled();
 
     await waitFor(async () => {
       const readModel = await harness.readModel();
       return (
         readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.title ===
-        "Generated title"
+        seededTitle
       );
     });
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Generated title");
+    expect(thread?.title).toBe(seededTitle);
   });
 
   it("regenerates a thread title from the current conversation", async () => {
@@ -1479,7 +1478,7 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.title).toBe("Keep this custom title");
   });
 
-  it("matches the client-seeded title even when the outgoing prompt is reformatted", async () => {
+  it("keeps the client-seeded title verbatim on the first turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
     const seededTitle = "Fix reconnect spinner on resume";
@@ -1516,18 +1515,13 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await waitFor(() => harness.generateThreadTitle.mock.calls.length === 1);
-    await waitFor(async () => {
-      const readModel = await harness.readModel();
-      return (
-        readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.title ===
-        "Reconnect spinner resume bug"
-      );
-    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    // The client seed wins verbatim; no text-generation round-trip runs.
+    expect(harness.generateThreadTitle).not.toHaveBeenCalled();
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Reconnect spinner resume bug");
+    expect(thread?.title).toBe(seededTitle);
   });
 
   it("generates a worktree branch name for the first turn", async () => {

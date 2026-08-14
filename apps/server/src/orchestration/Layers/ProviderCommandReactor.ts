@@ -31,6 +31,7 @@ import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
+import { sanitizeThreadTitle } from "../../textGeneration/TextGenerationUtils.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -878,19 +879,13 @@ const make = Effect.gen(function* () {
       readonly messageText: string;
       readonly attachments?: ReadonlyArray<ChatAttachment>;
       readonly titleSeed?: string;
+      readonly modelSelection?: ModelSelection;
     }) {
-      const attachments = input.attachments ?? [];
       yield* Effect.gen(function* () {
-        const { textGenerationModelSelection: modelSelection } =
-          yield* serverSettingsService.getSettings;
-
-        const generated = yield* textGeneration.generateThreadTitle({
-          cwd: input.cwd,
-          message: input.messageText,
-          ...(attachments.length > 0 ? { attachments } : {}),
-          modelSelection,
-        });
-        if (!generated) return;
+        // Derive from the first message (or client seed) instead of asking
+        // the provider. GJC already titles its own session, and a second
+        // `gjc acp` round-trip delays the first turn by 30-60s.
+        const title = input.titleSeed?.trim() || sanitizeThreadTitle(input.messageText);
 
         const thread = yield* resolveThread(input.threadId);
         if (!thread) return;
@@ -902,7 +897,7 @@ const make = Effect.gen(function* () {
           type: "thread.meta.update",
           commandId: yield* serverCommandId("thread-title-rename"),
           threadId: input.threadId,
-          title: generated.title,
+          title,
         });
       }).pipe(
         Effect.catchCause((cause) =>
@@ -1138,6 +1133,7 @@ const make = Effect.gen(function* () {
         yield* maybeGenerateThreadTitleForFirstTurn({
           threadId: event.payload.threadId,
           cwd: generationCwd,
+          modelSelection: thread.modelSelection,
           ...generationInput,
         }).pipe(Effect.forkScoped);
       }
