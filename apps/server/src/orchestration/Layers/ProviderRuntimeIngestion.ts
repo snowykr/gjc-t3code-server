@@ -342,6 +342,7 @@ function taskLinkageActivityFields(payload: Record<string, unknown>): Record<str
   for (const key of [
     "taskType",
     "agentId",
+    "parentToolUseId",
     "agentName",
     "requestedTaskIds",
     "agentIds",

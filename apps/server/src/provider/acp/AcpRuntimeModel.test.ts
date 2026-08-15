@@ -347,6 +347,71 @@ describe("AcpRuntimeModel", () => {
     expect(readGjcTaskLifecycleBoundary({ _meta: { gjc: {} } })).toBeUndefined();
   });
 
+  it("round-trips hierarchy fields on a GJC task start boundary", () => {
+    expect(
+      readGjcTaskLifecycleBoundary({
+        _meta: {
+          gjc: {
+            agentName: "nested-agent",
+            requestedTaskIds: ["task-nested"],
+            subagentCount: 1,
+            agentId: "agent-child-1",
+            parentToolUseId: "tool-parent-1",
+            parentAgentId: "agent-parent-1",
+            depth: 2,
+            title: "Nested child",
+            subagentType: "reviewer",
+          },
+        },
+        update: { sessionUpdate: "tool_call", toolCallId: "tool-nested" },
+      }),
+    ).toEqual({
+      kind: "started",
+      agentName: "nested-agent",
+      requestedTaskIds: ["task-nested"],
+      subagentCount: 1,
+      agentId: "agent-child-1",
+      parentToolUseId: "tool-parent-1",
+      parentAgentId: "agent-parent-1",
+      depth: 2,
+      title: "Nested child",
+      subagentType: "reviewer",
+    });
+  });
+
+  it("retains hierarchy fields on a partially failed GJC task completion", () => {
+    expect(
+      readGjcTaskLifecycleBoundary({
+        _meta: {
+          gjc: {
+            requestedTaskIds: ["task-nested", "task-missing"],
+            agentIds: ["agent-child-1"],
+            subagentCount: 2,
+            reason: "scheduling_failed",
+            agentId: "agent-child-1",
+            parentToolUseId: "tool-parent-1",
+            parentAgentId: "agent-parent-1",
+            depth: 2,
+            title: "Nested child",
+            subagentType: "reviewer",
+          },
+        },
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tool-nested" },
+      }),
+    ).toEqual({
+      kind: "completed",
+      agentIds: ["agent-child-1"],
+      subagentCount: 2,
+      reason: "scheduling_failed",
+      agentId: "agent-child-1",
+      parentToolUseId: "tool-parent-1",
+      parentAgentId: "agent-parent-1",
+      depth: 2,
+      title: "Nested child",
+      subagentType: "reviewer",
+    });
+  });
+
   it("trims padded current mode updates before emitting a mode change", () => {
     const result = parseSessionUpdateEvent({
       sessionId: "session-1",

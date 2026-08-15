@@ -573,6 +573,8 @@ const taskAgentLinkageFields = {
    * agent-internal and keep them out of the parent work log.
    */
   agentId: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** Parent tool invocation that established this task's agent lineage. */
+  parentToolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
   title: Schema.optional(TrimmedNonEmptyStringSchema),
   role: Schema.optional(TrimmedNonEmptyStringSchema),
   model: Schema.optional(TrimmedNonEmptyStringSchema),

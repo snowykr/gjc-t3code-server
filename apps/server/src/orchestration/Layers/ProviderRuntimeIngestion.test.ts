@@ -3333,6 +3333,12 @@ describe("ProviderRuntimeIngestion", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
+    // Attribution note for the future GJC upstream: subagent-internal tool
+    // notifications may carry data._meta.gjc.parentToolUseId, but re-homing
+    // is driven by ItemLifecyclePayload.parentToolUseId. Emit that linkage
+    // on item.started/updated/completed at the provider boundary (rather
+    // than making the client inspect opaque data) so nested tool rows can be
+    // associated with the owning agent even when the task start row expires.
     harness.emit({
       type: "task.started",
       eventId: asEventId("evt-task-started"),
@@ -3344,6 +3350,12 @@ describe("ProviderRuntimeIngestion", () => {
         taskId: "turn-task-1",
         taskType: "plan",
         agentName: "batch-agent",
+        agentId: "agent-child-1",
+        parentToolUseId: "tool-parent-1",
+        parentAgentId: "agent-parent-1",
+        agentIndex: 2,
+        title: "Nested child",
+        role: "reviewer",
         requestedTaskIds: ["requested-a", "requested-b"],
         subagentCount: 2,
       },
@@ -3360,6 +3372,12 @@ describe("ProviderRuntimeIngestion", () => {
         taskId: "turn-task-1",
         description: "Comparing the desktop rollout chunks to the app-server stream.",
         summary: "Code reviewer is validating the desktop rollout chunks.",
+        agentId: "agent-child-1",
+        parentToolUseId: "tool-parent-1",
+        parentAgentId: "agent-parent-1",
+        agentIndex: 2,
+        title: "Nested child",
+        role: "reviewer",
       },
     });
 
@@ -3375,6 +3393,12 @@ describe("ProviderRuntimeIngestion", () => {
         status: "completed",
         summary: "<proposed_plan>\n# Plan title\n</proposed_plan>",
         agentName: "batch-agent",
+        agentId: "agent-child-1",
+        parentToolUseId: "tool-parent-1",
+        parentAgentId: "agent-parent-1",
+        agentIndex: 2,
+        title: "Nested child",
+        role: "reviewer",
         requestedTaskIds: ["requested-a", "requested-b"],
         agentIds: ["allocated-a", "allocated-b"],
         subagentCount: 2,
@@ -3428,6 +3452,12 @@ describe("ProviderRuntimeIngestion", () => {
     expect(started?.summary).toBe("Plan task started");
     expect(started?.payload).toMatchObject({
       agentName: "batch-agent",
+      agentId: "agent-child-1",
+      parentToolUseId: "tool-parent-1",
+      parentAgentId: "agent-parent-1",
+      agentIndex: 2,
+      title: "Nested child",
+      role: "reviewer",
       requestedTaskIds: ["requested-a", "requested-b"],
       subagentCount: 2,
     });
@@ -3436,9 +3466,23 @@ describe("ProviderRuntimeIngestion", () => {
     expect(progressPayload?.summary).toBe(
       "Code reviewer is validating the desktop rollout chunks.",
     );
+    expect(progressPayload).toMatchObject({
+      agentId: "agent-child-1",
+      parentToolUseId: "tool-parent-1",
+      parentAgentId: "agent-parent-1",
+      agentIndex: 2,
+      title: "Nested child",
+      role: "reviewer",
+    });
     expect(completed?.kind).toBe("task.completed");
     expect(completed?.payload).toMatchObject({
       agentName: "batch-agent",
+      agentId: "agent-child-1",
+      parentToolUseId: "tool-parent-1",
+      parentAgentId: "agent-parent-1",
+      agentIndex: 2,
+      title: "Nested child",
+      role: "reviewer",
       requestedTaskIds: ["requested-a", "requested-b"],
       agentIds: ["allocated-a", "allocated-b"],
       subagentCount: 2,

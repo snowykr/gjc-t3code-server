@@ -91,13 +91,14 @@ const makeTestAdapter = (binaryPath: string, options?: Parameters<typeof makeGjc
     Effect.orDie,
   );
 
-function collectGjcTaskLifecycleEvents(mode: string, reason?: string) {
+function collectGjcTaskLifecycleEvents(mode: string, reason?: string, hierarchy = false) {
   return Effect.gen(function* () {
     const threadId = ThreadId.make(`gjc-task-lifecycle-${mode}-${reason ?? "normal"}`);
     const wrapperPath = yield* Effect.promise(() =>
       makeMockGjcWrapper({
         T3_ACP_GJC_TASK_LIFECYCLE: mode,
         ...(reason ? { T3_ACP_GJC_TASK_REASON: reason } : {}),
+        ...(hierarchy ? { T3_ACP_GJC_TASK_HIERARCHY: "1" } : {}),
       }),
     );
     const adapter = yield* makeTestAdapter(wrapperPath);
@@ -290,6 +291,33 @@ it.layer(gjcAdapterTestLayer)("GjcAdapterLive", (it) => {
         assert.deepEqual(completedEvent.payload.agentIds, ["allocated-a", "allocated-b"]);
         assert.equal(completedEvent.payload.subagentCount, 2);
         assert.deepEqual(completedEvent.payload.requestedTaskIds, ["requested-a", "requested-b"]);
+      }
+    }),
+  );
+
+  it.effect("propagates GJC task hierarchy on start and completion", () =>
+    Effect.gen(function* () {
+      const events = yield* collectGjcTaskLifecycleEvents("completed", undefined, true);
+      const started = events.find((event) => event.type === "task.started");
+      const completed = events.find((event) => event.type === "task.completed");
+
+      assert.isDefined(started);
+      assert.isDefined(completed);
+      if (started?.type === "task.started") {
+        assert.equal(started.payload.agentId, "agent-child-1");
+        assert.equal(started.payload.parentToolUseId, "tool-parent-1");
+        assert.equal(started.payload.parentAgentId, "agent-parent-1");
+        assert.equal(started.payload.agentIndex, 2);
+        assert.equal(started.payload.title, "Nested child");
+        assert.equal(started.payload.role, "reviewer");
+      }
+      if (completed?.type === "task.completed") {
+        assert.equal(completed.payload.agentId, "agent-child-1");
+        assert.equal(completed.payload.parentToolUseId, "tool-parent-1");
+        assert.equal(completed.payload.parentAgentId, "agent-parent-1");
+        assert.equal(completed.payload.agentIndex, 2);
+        assert.equal(completed.payload.title, "Nested child");
+        assert.equal(completed.payload.role, "reviewer");
       }
     }),
   );
