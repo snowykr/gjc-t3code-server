@@ -52,9 +52,9 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 // GJC starts a broker and session host before `session/new` returns its model
-// config option. A normal cold probe currently takes about 12 seconds, so 15
-// seconds leaves no room for process scheduling or teardown.
-const GJC_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 30_000;
+// config option. Cold probe measured 15-28s (2026-08-15) with contention, so
+// 60s leaves margin for scheduling/teardown. Raw `gjc acp` probe was 28s.
+const GJC_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 60_000;
 
 // GJC is a provider, not a model: there is no built-in model named "gjc". When
 // ACP model discovery fails the provider reports an empty model list rather
@@ -330,10 +330,22 @@ export const checkGjcProviderStatus = Effect.fn("checkGjcProviderStatus")(functi
   );
   if (Exit.isFailure(discoveryExit)) {
     const authenticationFailure = isGjcAuthenticationFailureCause(discoveryExit.cause);
+    const pretty = Cause.pretty(discoveryExit.cause);
+    const requestError = Option.getOrUndefined(
+      Cause.find(discoveryExit.cause, (u) =>
+        Schema.is(EffectAcpErrors.AcpRequestError)(u as never)
+          ? Option.some(u as EffectAcpErrors.AcpRequestError)
+          : Option.none(),
+      ),
+    );
+    const brokerDetail =
+      (requestError?.data as { details?: unknown } | undefined)?.details != null
+        ? String((requestError.data as { details: unknown }).details)
+        : pretty.replace(/\s+/g, " ").trim().slice(0, 400);
     yield* Effect.logWarning("GJC ACP model discovery failed", {
       errorTag: causeErrorTag(discoveryExit.cause),
       authenticationFailure,
-      causeDetail: Cause.pretty(discoveryExit.cause).slice(0, 800),
+      causeDetail: pretty,
     });
     return buildServerProvider({
       presentation: GJC_PRESENTATION,
@@ -343,11 +355,13 @@ export const checkGjcProviderStatus = Effect.fn("checkGjcProviderStatus")(functi
       probe: {
         installed: true,
         version,
-        status: "error",
+        status: authenticationFailure ? "error" : "warning",
         auth: authenticationFailure ? { status: "unauthenticated" } : { status: "unknown" },
         message: authenticationFailure
           ? GJC_AUTHENTICATION_FAILURE_MESSAGE
-          : "GJC CLI started but ACP model discovery failed.",
+          : brokerDetail
+            ? `GJC CLI started but ACP model discovery failed: ${brokerDetail}`
+            : "GJC CLI started but ACP model discovery failed.",
       },
     });
   }
@@ -363,7 +377,7 @@ export const checkGjcProviderStatus = Effect.fn("checkGjcProviderStatus")(functi
       probe: {
         installed: true,
         version,
-        status: "error",
+        status: "warning",
         auth: { status: "unknown" },
         message: "GJC CLI timed out while discovering models.",
       },
