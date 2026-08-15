@@ -133,6 +133,7 @@ export interface GjcBridgeEvent extends BridgeFrameBase {
 export type GjcBridgeSessionEvent =
   | { readonly kind: "text"; readonly delta: string }
   | { readonly kind: "thinking"; readonly delta: string }
+  | { readonly kind: "reasoning_summary"; readonly delta: string }
   | {
       readonly kind: "tool";
       readonly toolCallId: string;

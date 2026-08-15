@@ -347,9 +347,12 @@ function mapAssistantMessageUpdate(event: unknown): ReadonlyArray<GjcBridgeSessi
         ? [{ kind: "text", delta: stringField(event, "delta") }]
         : [];
     case "thinking_delta":
-    case "reasoning_summary_delta":
       return nonEmptyStringField(event, "delta")
         ? [{ kind: "thinking", delta: stringField(event, "delta") }]
+        : [];
+    case "reasoning_summary_delta":
+      return nonEmptyStringField(event, "delta")
+        ? [{ kind: "reasoning_summary", delta: stringField(event, "delta") }]
         : [];
     default:
       // Tool-call streaming events describe the model's proposed call. The
@@ -365,8 +368,10 @@ function mapAssistantMessageEnd(message: unknown): ReadonlyArray<GjcBridgeSessio
   }
   return message.content.flatMap((part) => {
     if (!isRecord(part) || part.type !== "thinking") return [];
-    const text = nonEmptyStringField(part, "summaryText") ?? nonEmptyStringField(part, "thinking");
-    return text ? [{ kind: "thinking" as const, delta: text }] : [];
+    const summaryText = nonEmptyStringField(part, "summaryText");
+    if (summaryText) return [{ kind: "reasoning_summary" as const, delta: summaryText }];
+    const thinking = nonEmptyStringField(part, "thinking");
+    return thinking ? [{ kind: "thinking" as const, delta: thinking }] : [];
   });
 }
 

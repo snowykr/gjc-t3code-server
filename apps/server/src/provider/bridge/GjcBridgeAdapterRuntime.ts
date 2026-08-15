@@ -56,25 +56,29 @@ export const makeGjcBridgeAdapterRuntime = (
     const toolInputs = new Map<string, unknown>();
 
     // Bridge event -> AcpParsedSessionEvent mapping.
+    const bridgeKindToStreamKind: Record<
+      string,
+      "assistant_text" | "reasoning_text" | "reasoning_summary_text"
+    > = {
+      text: "assistant_text",
+      thinking: "reasoning_text",
+      reasoning_summary: "reasoning_summary_text",
+    };
     runtime.onEvent((event) => {
       let parsed: AcpParsedSessionEvent | undefined;
       switch (event.kind) {
         case "text":
-          parsed = {
-            _tag: "ContentDelta",
-            text: event.delta,
-            streamKind: "assistant_text",
-            rawPayload: { text: event.delta },
-          };
-          break;
         case "thinking":
+        case "reasoning_summary": {
+          const streamKind = bridgeKindToStreamKind[event.kind] ?? "assistant_text";
           parsed = {
             _tag: "ContentDelta",
             text: event.delta,
-            streamKind: "reasoning_text",
-            rawPayload: { text: event.delta },
+            streamKind,
+            rawPayload: { text: event.delta, kind: event.kind },
           };
           break;
+        }
         case "tool": {
           toolInputs.set(event.toolCallId, event.input);
           parsed = {
