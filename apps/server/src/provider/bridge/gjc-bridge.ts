@@ -33,13 +33,13 @@ function log(...args: unknown[]): void {
 async function main(): Promise<void> {
   let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | null = null;
   let sessionId = "";
+  let isCreatingSession = false;
   const pendingRequests = new Map<string, (frame: GjcBridgeServerFrame) => void>();
 
   const readline = (await import("node:readline")).createInterface({
     input: process.stdin,
     crlfDelay: Infinity,
   });
-  let frameQueue = Promise.resolve();
 
   const handleClientFrame = async (raw: string): Promise<void> => {
     let frame: GjcBridgeClientFrame;
@@ -57,8 +57,11 @@ async function main(): Promise<void> {
 
       case "session/create": {
         let createdSession: NonNullable<typeof session> | null = null;
+        let ownsCreation = false;
         try {
-          if (session) throw new Error("a GJC bridge session already exists");
+          if (session || isCreatingSession) throw new Error("a GJC bridge session already exists");
+          isCreatingSession = true;
+          ownsCreation = true;
           const modelError =
             frame.model === undefined ? undefined : selectionInputError(frame.model);
           if (modelError) {
@@ -261,6 +264,8 @@ async function main(): Promise<void> {
             message: error instanceof Error ? error.message : String(error),
             code: "session-create",
           });
+        } finally {
+          if (ownsCreation) isCreatingSession = false;
         }
         return;
       }
@@ -407,15 +412,13 @@ async function main(): Promise<void> {
   // Read frames line by line.
   readline.on("line", (line) => {
     if (line.trim().length === 0) return;
-    frameQueue = frameQueue
-      .then(() => handleClientFrame(line))
-      .catch((error) => {
-        send({
-          seq: nextSeq(),
-          type: "error",
-          message: error instanceof Error ? error.message : String(error),
-        });
+    void handleClientFrame(line).catch((error) => {
+      send({
+        seq: nextSeq(),
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
       });
+    });
   });
 
   readline.on("close", () => {
