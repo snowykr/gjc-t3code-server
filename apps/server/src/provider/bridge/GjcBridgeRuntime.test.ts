@@ -19,9 +19,13 @@ describe("GjcBridgeProtocol", () => {
     const available = [
       { provider: "cliproxy", id: "gpt-5.6-luna" },
       { provider: "openai-codex", id: "gpt-5" },
+      { provider: "provider/with-slash", id: "model/with-slash" },
     ];
 
     expect(findAvailableConcreteModel(available, "cliproxy/gpt-5.6-luna")).toEqual(available[0]);
+    expect(findAvailableConcreteModel(available, "provider/with-slash/model/with-slash")).toEqual(
+      available[2],
+    );
     expect(findAvailableConcreteModel(available, "gajae-code/mixed-high")).toBeUndefined();
     expect(findAvailableConcreteModel(available, "cliproxy/missing")).toBeUndefined();
   });

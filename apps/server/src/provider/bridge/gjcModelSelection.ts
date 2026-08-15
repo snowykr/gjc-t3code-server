@@ -13,7 +13,7 @@ export function profileNameForSelection(input: {
 }): string | undefined {
   const prefix = `${SYNTHETIC_PROVIDER_ID}/`;
   const profile = input.model?.startsWith(prefix) ? input.model.slice(prefix.length) : undefined;
-  if (profile !== undefined) return profile;
+  if (profile) return profile;
   const configured = input.modelProfile?.trim();
   return configured || undefined;
 }
@@ -24,11 +24,7 @@ export function findAvailableConcreteModel<T extends GjcSelectableModel>(
   modelId: string,
 ): T | undefined {
   if (profileNameForSelection({ model: modelId }) !== undefined) return undefined;
-  const separator = modelId.indexOf("/");
-  if (separator <= 0 || separator === modelId.length - 1) return undefined;
-  const provider = modelId.slice(0, separator);
-  const id = modelId.slice(separator + 1);
-  return models.find((model) => model.provider === provider && model.id === id);
+  return models.find((model) => `${model.provider}/${model.id}` === modelId);
 }
 
 export function hasSyntheticProfileNamespaceCollision(

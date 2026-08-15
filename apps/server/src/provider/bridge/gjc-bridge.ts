@@ -55,10 +55,16 @@ async function main(): Promise<void> {
 
       case "session/create": {
         try {
+          if (frame.model !== undefined && frame.model.length === 0) {
+            throw new Error("Model selection must not be empty.");
+          }
           const requestedProfile = profileNameForSelection({
             model: frame.model,
             modelProfile: frame.options?.modelProfile,
           });
+          if (frame.model === "gajae-code/") {
+            throw new Error("Model profile selection must include a profile name.");
+          }
           const created = await createAgentSession({
             cwd: frame.cwd,
             // The SDK's `model` option is a Model object, not a provider/id
@@ -78,9 +84,8 @@ async function main(): Promise<void> {
               : { thinkingLevel: "low" as never }),
           });
           session = created.session;
+          const availableModels = session.getAvailableModels() as ReadonlyArray<GjcSelectableModel>;
           if (requestedProfile) {
-            const availableModels =
-              session.getAvailableModels() as ReadonlyArray<GjcSelectableModel>;
             if (
               hasSyntheticProfileNamespaceCollision(
                 availableModels,
@@ -95,6 +100,10 @@ async function main(): Promise<void> {
             if (!activated)
               throw new Error(`Model profile ${requestedProfile} could not be activated.`);
             log("activated profile:", requestedProfile);
+          } else if (frame.model) {
+            const model = findAvailableConcreteModel(availableModels, frame.model);
+            if (!model) throw new Error(`Model ${frame.model} is not currently available.`);
+            await (session as any).setModel(model, "default", { cause: "user-selection" });
           }
           let configOptions:
             | ReadonlyArray<{
