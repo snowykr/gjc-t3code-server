@@ -166,6 +166,10 @@ export const makeGjcBridgeAdapterRuntime = (
 
     const start = Effect.gen(function* () {
       yield* runtime.createSession(createOptions()).pipe(Effect.orDie);
+      const bridgeConfigOptions = (runtime as any).getReadyConfigOptions?.() ?? [];
+      const configOptions = Array.isArray(bridgeConfigOptions)
+        ? (bridgeConfigOptions as unknown as ReadonlyArray<EffectAcpSchema.SessionConfigOption>)
+        : [];
       const sessionId = sessionIdRef.get() || `bridge-${process.pid}`;
       return {
         sessionId,
@@ -181,7 +185,7 @@ export const makeGjcBridgeAdapterRuntime = (
         sessionSetupResult: {
           sessionId,
           cwd: input.cwd,
-          configOptions: [],
+          configOptions,
           models: { currentModelId: input.model },
         } as never,
         modelConfigId: input.model,

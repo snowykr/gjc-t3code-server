@@ -151,12 +151,15 @@ it.layer(NodeServices.layer)("checkGjcProviderStatus", (it) => {
         }),
       );
 
-      expect(snapshot.status).toBe("error");
-      expect(snapshot.auth.status).toBe("unknown");
+      // With SDK-first discovery, a fake binary that only fails on `acp` no
+      // longer crashes discovery: the SDK bridge supplies the real catalog in
+      // ~2.5s and the provider is ready. The ACP error path is still covered
+      // when both SDK and ACP are unavailable (fallback).
+      expect(["ready", "warning"]).toContain(snapshot.status);
       expect(snapshot.installed).toBe(true);
-      expect(snapshot.models).toEqual([]);
-      expect(snapshot.message).toBe("GJC CLI started but ACP model discovery failed.");
-      expect(snapshot.message).not.toContain("ACP protocol crashed");
+      expect(
+        snapshot.message === undefined || !snapshot.message.includes("ACP protocol crashed"),
+      ).toBe(true);
     }),
   );
 });

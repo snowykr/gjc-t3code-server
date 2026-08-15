@@ -18,6 +18,7 @@ import * as Effect from "effect/Effect";
 
 import type {
   GjcBridgeClientFrame,
+  GjcBridgeReady,
   GjcBridgeServerFrame,
   GjcBridgeSessionEvent,
 } from "./bridgeProtocol.ts";
@@ -50,6 +51,8 @@ export class GjcBridgeError extends Error {
 }
 
 export interface GjcBridgeRuntime {
+  /** Config options reported by the most recent successful ready frame. */
+  readonly getReadyConfigOptions: () => ReadonlyArray<unknown> | undefined;
   /** Create the SDK session in the bridge and await the ready frame. */
   readonly createSession: (options: GjcBridgeCreateOptions) => Effect.Effect<void, GjcBridgeError>;
   readonly setModel: (model: string) => Effect.Effect<void, GjcBridgeError>;
@@ -120,6 +123,7 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
 
   let readyResolve: (() => void) | null = null;
   let readyReject: ((error: GjcBridgeError) => void) | null = null;
+  let readyConfigOptions: ReadonlyArray<unknown> | undefined;
 
   const rejectReady = (error: GjcBridgeError): void => {
     const reject = readyReject;
@@ -142,6 +146,7 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
     }
     switch (frame.type) {
       case "ready":
+        readyConfigOptions = (frame as GjcBridgeReady).configOptions;
         readyResolve?.();
         readyResolve = null;
         break;
@@ -236,6 +241,7 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
     });
 
   return {
+    getReadyConfigOptions: () => readyConfigOptions,
     createSession: (options) =>
       Effect.gen(function* () {
         send({

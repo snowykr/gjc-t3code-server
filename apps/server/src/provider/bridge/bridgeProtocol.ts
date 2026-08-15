@@ -122,6 +122,13 @@ export interface GjcBridgeReady extends BridgeFrameBase {
   readonly sessionId: string;
   readonly model: string;
   readonly cwd: string;
+  /** SDK ready includes the available model catalog when one is available. */
+  readonly configOptions?: ReadonlyArray<{
+    readonly id: string;
+    readonly name?: string;
+    readonly type: "select";
+    readonly options: ReadonlyArray<{ readonly value: string; readonly name?: string }>;
+  }>;
 }
 
 export interface GjcBridgeEvent extends BridgeFrameBase {

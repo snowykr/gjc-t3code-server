@@ -33,6 +33,7 @@ import {
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import { makeGjcAcpRuntime, resolveGjcAcpBaseModelId } from "../acp/GjcAcpSupport.ts";
+import { makeGjcBridgeAdapterRuntime } from "../bridge/GjcBridgeAdapterRuntime.ts";
 import {
   GJC_AUTHENTICATION_FAILURE_MESSAGE,
   isAcpAuthenticationFailure,
@@ -51,9 +52,10 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 });
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
-// GJC starts a broker and session host before `session/new` returns its model
-// config option. Cold probe measured 15-28s (2026-08-15) with contention, so
-// 60s leaves margin for scheduling/teardown. Raw `gjc acp` probe was 28s.
+// SDK bridge is ~2.5s (ready), ACP is 28-40s. Try SDK first (8s
+// timeout) and fall back to ACP (60s) only when the bridge is
+// unavailable or returns an empty catalog.
+const GJC_SDK_MODEL_DISCOVERY_TIMEOUT_MS = 8_000;
 const GJC_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 60_000;
 
 // GJC is a provider, not a model: there is no built-in model named "gjc". When
@@ -204,6 +206,24 @@ const discoverGjcModelsViaAcp = (
     );
   }).pipe(Effect.scoped);
 
+const discoverGjcModelsViaSdkBridge = (
+  gjcSettings: GjcSettings,
+  environment: NodeJS.ProcessEnv = process.env,
+) =>
+  Effect.gen(function* () {
+    const bridge = yield* makeGjcBridgeAdapterRuntime({
+      gjcSettings,
+      cwd: process.cwd(),
+      ...(environment ? { environment } : {}),
+    });
+    const started = yield* bridge.start();
+    return (
+      buildGjcDiscoveredModelsFromConfigOptions(
+        started.sessionSetupResult.configOptions as never,
+      ) ?? buildGjcDiscoveredModelsFromSessionModelState(started.sessionSetupResult.models as never)
+    );
+  }).pipe(Effect.scoped);
+
 const isGjcAuthenticationFailureCause = (cause: Cause.Cause<unknown>): boolean => {
   const failure = Cause.findErrorOption(cause);
   return (
@@ -324,6 +344,41 @@ export const checkGjcProviderStatus = Effect.fn("checkGjcProviderStatus")(functi
     });
   }
 
+  // SDK bridge is ~2.5s (ready). Try it first with a short timeout; fall
+  // back to ACP (28-40s) only when the bridge is unavailable or returns an
+  // empty catalog. Keep ACP as the durable fallback.
+  const sdkExit = yield* discoverGjcModelsViaSdkBridge(gjcSettings, environment).pipe(
+    Effect.timeoutOption(GJC_SDK_MODEL_DISCOVERY_TIMEOUT_MS),
+    Effect.exit,
+  );
+  if (Exit.isSuccess(sdkExit) && Option.isSome(sdkExit.value)) {
+    const sdkModels = sdkExit.value.value;
+    if (sdkModels !== undefined && sdkModels.length > 0) {
+      const models = gjcModelsFromSettings(gjcSettings.customModels, sdkModels);
+      return buildServerProvider({
+        presentation: GJC_PRESENTATION,
+        enabled: gjcSettings.enabled,
+        checkedAt,
+        models,
+        probe: {
+          installed: true,
+          version,
+          status: "ready",
+          auth: { status: "unknown" },
+        },
+      });
+    }
+  }
+  if (Exit.isFailure(sdkExit)) {
+    yield* Effect.logWarning("GJC SDK model discovery failed, falling back to ACP", {
+      errorTag: causeErrorTag(sdkExit.cause),
+    });
+  } else if (Exit.isSuccess(sdkExit) && Option.isNone(sdkExit.value)) {
+    yield* Effect.logWarning(
+      `GJC SDK model discovery timed out after ${GJC_SDK_MODEL_DISCOVERY_TIMEOUT_MS}ms, falling back to ACP.`,
+    );
+  }
+
   const discoveryExit = yield* discoverGjcModelsViaAcp(gjcSettings, environment).pipe(
     Effect.timeoutOption(GJC_ACP_MODEL_DISCOVERY_TIMEOUT_MS),
     Effect.exit,
@@ -385,7 +440,7 @@ export const checkGjcProviderStatus = Effect.fn("checkGjcProviderStatus")(functi
   }
   const discoveredModels = discoveryExit.value.value;
   const models =
-    discoveredModels.length > 0
+    discoveredModels !== undefined && discoveredModels.length > 0
       ? gjcModelsFromSettings(gjcSettings.customModels, discoveredModels)
       : fallbackModels;
 
@@ -397,8 +452,11 @@ export const checkGjcProviderStatus = Effect.fn("checkGjcProviderStatus")(functi
     probe: {
       installed: true,
       version,
-      status: "ready",
+      status: discoveredModels !== undefined && discoveredModels.length > 0 ? "ready" : "warning",
       auth: { status: "unknown" },
+      ...(discoveredModels === undefined || discoveredModels.length === 0
+        ? { message: "GJC model catalog is empty." }
+        : {}),
     },
   });
 });

@@ -60,6 +60,38 @@ async function main(): Promise<void> {
               : { thinkingLevel: "low" as never }),
           });
           session = created.session;
+          let configOptions:
+            | ReadonlyArray<{
+                readonly id: string;
+                readonly name?: string;
+                readonly type: "select";
+                readonly options: ReadonlyArray<{
+                  readonly value: string;
+                  readonly name?: string;
+                }>;
+              }>
+            | undefined;
+          try {
+            const sdkModels = (session as any).getAvailableModels?.() ?? [];
+            if (Array.isArray(sdkModels)) {
+              const modelOptions = sdkModels.map((m: any) => ({
+                value: `${m.provider}/${m.id}`,
+                name: String(m.name ?? `${m.provider}/${m.id}`),
+              }));
+              if (modelOptions.length > 0) {
+                configOptions = [
+                  {
+                    id: "model",
+                    name: "Model",
+                    type: "select" as const,
+                    options: modelOptions,
+                  },
+                ];
+              }
+            }
+          } catch {
+            // Model discovery is best-effort; a failed lookup must not block ready.
+          }
           // T3 exposes GJC presets as `gajae-code/<profile>` model ids. When the
           // requested model is such a preset, activate the matching GJC model
           // profile explicitly — SDK mode does not auto-apply the configured
@@ -136,6 +168,7 @@ async function main(): Promise<void> {
             sessionId,
             model: rawModel ? String(rawModel) : "",
             cwd: frame.cwd,
+            ...(configOptions ? { configOptions } : {}),
           });
         } catch (error) {
           send({
