@@ -58,10 +58,24 @@ async function main(): Promise<void> {
           if (frame.model !== undefined && frame.model.length === 0) {
             throw new Error("Model selection must not be empty.");
           }
-          const requestedProfile = profileNameForSelection({
-            model: frame.model,
+          if (
+            frame.options?.modelProfile !== undefined &&
+            frame.options.modelProfile.trim().length === 0
+          ) {
+            throw new Error("Model profile selection must not be empty.");
+          }
+          const modelProfile = profileNameForSelection({
             modelProfile: frame.options?.modelProfile,
           });
+          const requestedModelProfile = profileNameForSelection({ model: frame.model });
+          if (
+            frame.model !== undefined &&
+            modelProfile !== undefined &&
+            requestedModelProfile !== modelProfile
+          ) {
+            throw new Error("Model and model profile selections conflict.");
+          }
+          const requestedProfile = requestedModelProfile ?? modelProfile;
           if (frame.model === "gajae-code/") {
             throw new Error("Model profile selection must include a profile name.");
           }
@@ -220,6 +234,15 @@ async function main(): Promise<void> {
             ...(configOptions ? { configOptions } : {}),
           });
         } catch (error) {
+          const failedSession = session;
+          session = null;
+          if (failedSession) {
+            try {
+              await (failedSession as any).dispose?.();
+            } catch {
+              // Preserve the original session/create failure.
+            }
+          }
           send({
             seq: nextSeq(),
             type: "error",
