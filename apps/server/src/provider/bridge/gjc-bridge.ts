@@ -54,7 +54,9 @@ async function main(): Promise<void> {
         return;
 
       case "session/create": {
+        let createdSession: NonNullable<typeof session> | null = null;
         try {
+          if (session) throw new Error("a GJC bridge session already exists");
           if (frame.model !== undefined && frame.model.length === 0) {
             throw new Error("Model selection must not be empty.");
           }
@@ -97,27 +99,29 @@ async function main(): Promise<void> {
               ? { thinkingLevel: frame.options.thinkingLevel }
               : { thinkingLevel: "low" as never }),
           });
-          session = created.session;
-          const availableModels = session.getAvailableModels() as ReadonlyArray<GjcSelectableModel>;
+          createdSession = created.session;
+          const activeSession = createdSession;
+          const availableModels =
+            activeSession.getAvailableModels() as ReadonlyArray<GjcSelectableModel>;
           if (requestedProfile) {
             if (
               hasSyntheticProfileNamespaceCollision(
                 availableModels,
-                session.modelRegistry.getConfiguredProviderIds(),
+                activeSession.modelRegistry.getConfiguredProviderIds(),
               )
             ) {
               throw new Error(
                 "The gajae-code provider namespace is reserved; profile selection is unavailable while it is configured.",
               );
             }
-            const activated = await session.activateModelProfileForControl(requestedProfile);
+            const activated = await activeSession.activateModelProfileForControl(requestedProfile);
             if (!activated)
               throw new Error(`Model profile ${requestedProfile} could not be activated.`);
             log("activated profile:", requestedProfile);
           } else if (frame.model) {
             const model = findAvailableConcreteModel(availableModels, frame.model);
             if (!model) throw new Error(`Model ${frame.model} is not currently available.`);
-            await (session as any).setModel(model, "default", { cause: "user-selection" });
+            await (activeSession as any).setModel(model, "default", { cause: "user-selection" });
           }
           let configOptions:
             | ReadonlyArray<{
@@ -131,10 +135,11 @@ async function main(): Promise<void> {
               }>
             | undefined;
           try {
-            const sdkModels = session.getAvailableModels() as ReadonlyArray<GjcSelectableModel>;
+            const sdkModels =
+              activeSession.getAvailableModels() as ReadonlyArray<GjcSelectableModel>;
             const namespaceCollision = hasSyntheticProfileNamespaceCollision(
               sdkModels,
-              session.modelRegistry.getConfiguredProviderIds(),
+              activeSession.modelRegistry.getConfiguredProviderIds(),
             );
             const concreteOptions = sdkModels
               .filter((model) => model.provider !== "gajae-code")
@@ -145,7 +150,7 @@ async function main(): Promise<void> {
             const availableProviders = new Set(sdkModels.map((model) => model.provider));
             // The SDK session owns the merged registry: its profile map includes
             // both built-ins and ~/.gjc/agent/models.yml definitions.
-            const profiles = session.modelRegistry.getModelProfiles() as ReadonlyMap<
+            const profiles = activeSession.modelRegistry.getModelProfiles() as ReadonlyMap<
               string,
               ModelProfileDefinition
             >;
@@ -176,11 +181,11 @@ async function main(): Promise<void> {
           // session.id may not exist on the public surface; fall back to the
           // session state id when present, else a stable per-process marker.
           const rawId =
-            (session as unknown as { id?: string }).id ??
-            (session.state as unknown as { id?: string })?.id;
+            (activeSession as unknown as { id?: string }).id ??
+            (activeSession.state as unknown as { id?: string })?.id;
           sessionId = rawId || `gjc-${process.pid}`;
 
-          session.subscribe((event: unknown) => {
+          activeSession.subscribe((event: unknown) => {
             for (const bridgeEvent of mapSessionEvents(event)) {
               send({ seq: nextSeq(), type: "event", event: bridgeEvent });
             }
@@ -188,43 +193,46 @@ async function main(): Promise<void> {
 
           // Wire the SDK permission provider: surface permission requests to the
           // node side as reverse frames and resolve them from permission/respond.
-          (session as any).setSdkPermissionProvider?.(async (toolCall: any, options: any[]) => {
-            const requestId = `perm-${nextSeq()}`;
-            send({
-              seq: nextSeq(),
-              type: "permission/request",
-              requestId,
-              toolCall: {
-                name: String(toolCall?.toolName ?? toolCall?.name ?? ""),
-                input: toolCall?.input ?? {},
-              },
-              options: (options ?? []).map((opt: any) => ({
-                id: String(opt?.id ?? ""),
-                label: String(opt?.label ?? opt?.id ?? ""),
-              })),
-            });
-            const outcome = await new Promise<{
-              outcome: "allow" | "deny" | "selected";
-              optionId?: string;
-            }>((resolve) => {
-              pendingRequests.set(`permission:${requestId}`, (frame) => {
-                if (frame.type === "event") {
-                  resolve(
-                    frame.event as unknown as {
-                      outcome: "allow" | "deny" | "selected";
-                      optionId?: string;
-                    },
-                  );
-                }
+          (activeSession as any).setSdkPermissionProvider?.(
+            async (toolCall: any, options: any[]) => {
+              const requestId = `perm-${nextSeq()}`;
+              send({
+                seq: nextSeq(),
+                type: "permission/request",
+                requestId,
+                toolCall: {
+                  name: String(toolCall?.toolName ?? toolCall?.name ?? ""),
+                  input: toolCall?.input ?? {},
+                },
+                options: (options ?? []).map((opt: any) => ({
+                  id: String(opt?.id ?? ""),
+                  label: String(opt?.label ?? opt?.id ?? ""),
+                })),
               });
-            });
-            if (outcome.outcome === "selected") {
-              return { outcome: "selected" as const, optionId: outcome.optionId! };
-            }
-            return { outcome: outcome.outcome as "allow" | "deny" };
-          });
+              const outcome = await new Promise<{
+                outcome: "allow" | "deny" | "selected";
+                optionId?: string;
+              }>((resolve) => {
+                pendingRequests.set(`permission:${requestId}`, (frame) => {
+                  if (frame.type === "event") {
+                    resolve(
+                      frame.event as unknown as {
+                        outcome: "allow" | "deny" | "selected";
+                        optionId?: string;
+                      },
+                    );
+                  }
+                });
+              });
+              if (outcome.outcome === "selected") {
+                return { outcome: "selected" as const, optionId: outcome.optionId! };
+              }
+              return { outcome: outcome.outcome as "allow" | "deny" };
+            },
+          );
 
-          const rawModel = (session?.model as unknown as { id?: string })?.id ?? frame.model;
+          session = activeSession;
+          const rawModel = (activeSession.model as unknown as { id?: string })?.id ?? frame.model;
           send({
             seq: nextSeq(),
             type: "ready",
@@ -234,11 +242,9 @@ async function main(): Promise<void> {
             ...(configOptions ? { configOptions } : {}),
           });
         } catch (error) {
-          const failedSession = session;
-          session = null;
-          if (failedSession) {
+          if (createdSession) {
             try {
-              await (failedSession as any).dispose?.();
+              await (createdSession as any).dispose?.();
             } catch {
               // Preserve the original session/create failure.
             }
