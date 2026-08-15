@@ -392,9 +392,10 @@ export const checkGjcProviderStatus = Effect.fn("checkGjcProviderStatus")(functi
         Schema.is(EffectAcpErrors.AcpRequestError),
       ),
     );
+    const requestDetails = (requestError?.data as { details?: unknown } | undefined)?.details;
     const brokerDetail =
-      (requestError?.data as { details?: unknown } | undefined)?.details != null
-        ? String((requestError.data as { details: unknown }).details)
+      requestDetails != null
+        ? String(requestDetails)
         : pretty.replace(/\s+/g, " ").trim().slice(0, 400);
     yield* Effect.logWarning("GJC ACP model discovery failed", {
       errorTag: causeErrorTag(discoveryExit.cause),
