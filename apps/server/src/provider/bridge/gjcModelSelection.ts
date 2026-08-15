@@ -6,6 +6,15 @@ export interface GjcSelectableModel {
   readonly name?: string;
 }
 
+export function selectionInputError(model: string): string | undefined {
+  if (model.trim().length === 0) return "Model selection must not be empty.";
+  const prefix = `${SYNTHETIC_PROVIDER_ID}/`;
+  if (model.startsWith(prefix) && model.slice(prefix.length).trim().length === 0) {
+    return "Model profile selection must include a profile name.";
+  }
+  return undefined;
+}
+
 /** Returns a configured profile name without imposing syntax on user-owned keys. */
 export function profileNameForSelection(input: {
   readonly model?: string | undefined;
@@ -13,7 +22,7 @@ export function profileNameForSelection(input: {
 }): string | undefined {
   const prefix = `${SYNTHETIC_PROVIDER_ID}/`;
   const profile = input.model?.startsWith(prefix) ? input.model.slice(prefix.length) : undefined;
-  if (profile) return profile;
+  if (profile?.trim()) return profile;
   const configured = input.modelProfile?.trim();
   return configured || undefined;
 }

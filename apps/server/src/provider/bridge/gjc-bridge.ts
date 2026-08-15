@@ -13,6 +13,7 @@ import {
   findAvailableConcreteModel,
   hasSyntheticProfileNamespaceCollision,
   profileNameForSelection,
+  selectionInputError,
   type GjcSelectableModel,
 } from "./gjcModelSelection.ts";
 
@@ -38,6 +39,7 @@ async function main(): Promise<void> {
     input: process.stdin,
     crlfDelay: Infinity,
   });
+  let frameQueue = Promise.resolve();
 
   const handleClientFrame = async (raw: string): Promise<void> => {
     let frame: GjcBridgeClientFrame;
@@ -57,8 +59,10 @@ async function main(): Promise<void> {
         let createdSession: NonNullable<typeof session> | null = null;
         try {
           if (session) throw new Error("a GJC bridge session already exists");
-          if (frame.model !== undefined && frame.model.length === 0) {
-            throw new Error("Model selection must not be empty.");
+          const modelError =
+            frame.model === undefined ? undefined : selectionInputError(frame.model);
+          if (modelError) {
+            throw new Error(modelError);
           }
           if (
             frame.options?.modelProfile !== undefined &&
@@ -78,9 +82,6 @@ async function main(): Promise<void> {
             throw new Error("Model and model profile selections conflict.");
           }
           const requestedProfile = requestedModelProfile ?? modelProfile;
-          if (frame.model === "gajae-code/") {
-            throw new Error("Model profile selection must include a profile name.");
-          }
           const created = await createAgentSession({
             cwd: frame.cwd,
             // The SDK's `model` option is a Model object, not a provider/id
@@ -183,7 +184,7 @@ async function main(): Promise<void> {
           const rawId =
             (activeSession as unknown as { id?: string }).id ??
             (activeSession.state as unknown as { id?: string })?.id;
-          sessionId = rawId || `gjc-${process.pid}`;
+          const candidateSessionId = rawId || `gjc-${process.pid}`;
 
           activeSession.subscribe((event: unknown) => {
             for (const bridgeEvent of mapSessionEvents(event)) {
@@ -231,17 +232,22 @@ async function main(): Promise<void> {
             },
           );
 
-          session = activeSession;
           const rawModel = (activeSession.model as unknown as { id?: string })?.id ?? frame.model;
           send({
             seq: nextSeq(),
             type: "ready",
-            sessionId,
+            sessionId: candidateSessionId,
             model: rawModel ? String(rawModel) : "",
             cwd: frame.cwd,
             ...(configOptions ? { configOptions } : {}),
           });
+          sessionId = candidateSessionId;
+          session = activeSession;
         } catch (error) {
+          if (session === createdSession) {
+            session = null;
+            sessionId = "";
+          }
           if (createdSession) {
             try {
               await (createdSession as any).dispose?.();
@@ -266,6 +272,8 @@ async function main(): Promise<void> {
         }
         try {
           const raw = frame.model;
+          const inputError = selectionInputError(raw);
+          if (inputError) throw new Error(inputError);
           const profile = profileNameForSelection({ model: raw });
           if (profile) {
             if (
@@ -399,13 +407,15 @@ async function main(): Promise<void> {
   // Read frames line by line.
   readline.on("line", (line) => {
     if (line.trim().length === 0) return;
-    void handleClientFrame(line).catch((error) => {
-      send({
-        seq: nextSeq(),
-        type: "error",
-        message: error instanceof Error ? error.message : String(error),
+    frameQueue = frameQueue
+      .then(() => handleClientFrame(line))
+      .catch((error) => {
+        send({
+          seq: nextSeq(),
+          type: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
       });
-    });
   });
 
   readline.on("close", () => {

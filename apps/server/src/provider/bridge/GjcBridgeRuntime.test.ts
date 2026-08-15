@@ -5,6 +5,7 @@ import {
   findAvailableConcreteModel,
   hasSyntheticProfileNamespaceCollision,
   profileNameForSelection,
+  selectionInputError,
 } from "./gjcModelSelection.ts";
 
 describe("GjcBridgeProtocol", () => {
@@ -13,6 +14,17 @@ describe("GjcBridgeProtocol", () => {
       "mixed profile/v2",
     );
     expect(profileNameForSelection({ modelProfile: " custom_profile " })).toBe("custom_profile");
+  });
+
+  it("rejects empty and whitespace-only model selectors", () => {
+    expect(selectionInputError("")).toBe("Model selection must not be empty.");
+    expect(selectionInputError("  ")).toBe("Model selection must not be empty.");
+    expect(selectionInputError("gajae-code/")).toBe(
+      "Model profile selection must include a profile name.",
+    );
+    expect(selectionInputError("gajae-code/  ")).toBe(
+      "Model profile selection must include a profile name.",
+    );
   });
 
   it("resolves concrete choices to available model objects", () => {
