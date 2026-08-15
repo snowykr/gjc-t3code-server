@@ -1,8 +1,6 @@
 import { createAgentSession } from "@gajae-code/coding-agent/sdk/session";
-import {
-  BUILTIN_MODEL_PROFILES,
-  formatModelProfileDisplayLabel,
-} from "@gajae-code/coding-agent/config/model-profiles";
+import { isModelProfileProviderAvailable } from "@gajae-code/coding-agent/config/model-profile-contract";
+import { formatModelProfileDisplayLabel } from "@gajae-code/coding-agent/config/model-profiles";
 import type {
   GjcBridgeClientFrame,
   GjcBridgeServerFrame,
@@ -77,16 +75,29 @@ async function main(): Promise<void> {
             | undefined;
           try {
             const sdkModels = (session as any).getAvailableModels?.() ?? [];
-            const profileOptions = BUILTIN_MODEL_PROFILES.map((profile) => ({
-              value: `gajae-code/${profile.name}`,
-              name: formatModelProfileDisplayLabel(profile),
-            }));
             const concreteOptions = Array.isArray(sdkModels)
               ? sdkModels.map((m: any) => ({
                   value: `${m.provider}/${m.id}`,
                   name: String(m.name ?? `${m.provider}/${m.id}`),
                 }))
               : [];
+            const availableProviders = new Set(
+              Array.isArray(sdkModels)
+                ? sdkModels
+                    .map((model: any) =>
+                      typeof model.provider === "string" ? model.provider : undefined,
+                    )
+                    .filter(
+                      (provider: string | undefined): provider is string => provider !== undefined,
+                    )
+                : [],
+            );
+            const profileOptions = Array.from(session.modelRegistry.getModelProfiles().values())
+              .filter((profile) => isModelProfileProviderAvailable(profile, availableProviders))
+              .map((profile) => ({
+                value: `gajae-code/${profile.name}`,
+                name: formatModelProfileDisplayLabel(profile),
+              }));
             const allOptions = [...profileOptions, ...concreteOptions];
             if (allOptions.length > 0) {
               configOptions = [

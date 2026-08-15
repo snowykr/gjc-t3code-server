@@ -23,8 +23,24 @@ describe("GjcBridgeProtocol", () => {
       sessionId: "s1",
       model: "deepseek/deepseek-v4-flash",
       cwd: "/tmp",
+      configOptions: [
+        {
+          id: "model",
+          type: "select",
+          options: [
+            { value: "gajae-code/mixed-high", name: "mixed-high" },
+            { value: "cliproxy/gpt-5.6-luna", name: "GPT-5.6 Luna" },
+          ],
+        },
+      ],
     };
     expect(ready.type).toBe("ready");
+    if (ready.type === "ready") {
+      expect(ready.configOptions?.[0]?.options.map((option) => option.value)).toEqual([
+        "gajae-code/mixed-high",
+        "cliproxy/gpt-5.6-luna",
+      ]);
+    }
     const event: GjcBridgeServerFrame = {
       seq: 3,
       type: "event",

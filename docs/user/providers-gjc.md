@@ -1,9 +1,8 @@
 # GJC (Gajae Code)
 
-GJC (Gajae Code) runs as a provider through its ACP endpoint — the same protocol used by the
-Cursor and Grok providers. T3 Code spawns `gjc acp` per session and speaks ACP to it, so
-everything GJC supports over ACP works in T3 Code: sessions, streaming text and reasoning,
-tool calls, approvals, cancellation, and session resume.
+GJC (Gajae Code) runs through its SDK bridge, with ACP available as a fallback. T3 Code supports
+GJC sessions, streaming text and reasoning, tool calls, approvals, cancellation, and session
+resume.
 
 ## First-time setup
 
@@ -22,6 +21,10 @@ tool calls, approvals, cancellation, and session resume.
 
 ## Notes
 
+- **Models and profiles** share the model picker. It shows the concrete models currently usable
+  with your configured GJC providers and the profiles whose required providers are available.
+  Profiles appear as their profile names, such as `codex-eco` or a custom profile from
+  `~/.gjc/agent/models.yml` such as `mixed-high`; selecting one applies its GJC role mapping.
 - **Thinking** streams as reasoning while GJC works, and is kept in your thread transcript.
 - **Subagents** launched by GJC appear in the Agents surface as one row per batch, with the
   requested and allocated agent ids and counts.
