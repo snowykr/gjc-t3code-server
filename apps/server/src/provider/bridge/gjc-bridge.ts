@@ -9,6 +9,12 @@ import type {
   GjcBridgeServerFrame,
   GjcBridgeSessionEvent,
 } from "./bridgeProtocol.ts";
+import {
+  findAvailableConcreteModel,
+  hasSyntheticProfileNamespaceCollision,
+  profileNameForSelection,
+  type GjcSelectableModel,
+} from "./gjcModelSelection.ts";
 
 let seq = 0;
 const nextSeq = () => ++seq;
@@ -49,9 +55,16 @@ async function main(): Promise<void> {
 
       case "session/create": {
         try {
+          const requestedProfile = profileNameForSelection({
+            model: frame.model,
+            modelProfile: frame.options?.modelProfile,
+          });
           const created = await createAgentSession({
             cwd: frame.cwd,
-            ...(frame.model ? { model: frame.model } : {}),
+            // The SDK's `model` option is a Model object, not a provider/id
+            // selector string. Defer concrete selectors to the SDK resolver;
+            // synthetic profile selectors activate after the session exists.
+            ...(frame.model && !requestedProfile ? { modelPattern: frame.model } : {}),
             ...(frame.mcpConfigPath ? { mcpConfigPath: frame.mcpConfigPath } : {}),
             enableLsp: frame.options?.enableLsp ?? false,
             skipPythonPreflight: frame.options?.skipPythonPreflight ?? true,
@@ -65,6 +78,24 @@ async function main(): Promise<void> {
               : { thinkingLevel: "low" as never }),
           });
           session = created.session;
+          if (requestedProfile) {
+            const availableModels =
+              session.getAvailableModels() as ReadonlyArray<GjcSelectableModel>;
+            if (
+              hasSyntheticProfileNamespaceCollision(
+                availableModels,
+                session.modelRegistry.getConfiguredProviderIds(),
+              )
+            ) {
+              throw new Error(
+                "The gajae-code provider namespace is reserved; profile selection is unavailable while it is configured.",
+              );
+            }
+            const activated = await session.activateModelProfileForControl(requestedProfile);
+            if (!activated)
+              throw new Error(`Model profile ${requestedProfile} could not be activated.`);
+            log("activated profile:", requestedProfile);
+          }
           let configOptions:
             | ReadonlyArray<{
                 readonly id: string;
@@ -77,24 +108,18 @@ async function main(): Promise<void> {
               }>
             | undefined;
           try {
-            const sdkModels = (session as any).getAvailableModels?.() ?? [];
-            const concreteOptions = Array.isArray(sdkModels)
-              ? sdkModels.map((m: any) => ({
-                  value: `${m.provider}/${m.id}`,
-                  name: String(m.name ?? `${m.provider}/${m.id}`),
-                }))
-              : [];
-            const availableProviders = new Set(
-              Array.isArray(sdkModels)
-                ? sdkModels
-                    .map((model: any) =>
-                      typeof model.provider === "string" ? model.provider : undefined,
-                    )
-                    .filter(
-                      (provider: string | undefined): provider is string => provider !== undefined,
-                    )
-                : [],
+            const sdkModels = session.getAvailableModels() as ReadonlyArray<GjcSelectableModel>;
+            const namespaceCollision = hasSyntheticProfileNamespaceCollision(
+              sdkModels,
+              session.modelRegistry.getConfiguredProviderIds(),
             );
+            const concreteOptions = sdkModels
+              .filter((model) => model.provider !== "gajae-code")
+              .map((m) => ({
+                value: `${m.provider}/${m.id}`,
+                name: String(m.name ?? `${m.provider}/${m.id}`),
+              }));
+            const availableProviders = new Set(sdkModels.map((model) => model.provider));
             // The SDK session owns the merged registry: its profile map includes
             // both built-ins and ~/.gjc/agent/models.yml definitions.
             const profiles = session.modelRegistry.getModelProfiles() as ReadonlyMap<
@@ -102,7 +127,11 @@ async function main(): Promise<void> {
               ModelProfileDefinition
             >;
             const profileOptions = Array.from(profiles.values())
-              .filter((profile) => isModelProfileProviderAvailable(profile, availableProviders))
+              .filter(
+                (profile) =>
+                  !namespaceCollision &&
+                  isModelProfileProviderAvailable(profile, availableProviders),
+              )
               .map((profile) => ({
                 value: `gajae-code/${profile.name}`,
                 name: formatModelProfileDisplayLabel(profile),
@@ -120,24 +149,6 @@ async function main(): Promise<void> {
             }
           } catch {
             // Model discovery is best-effort; a failed lookup must not block ready.
-          }
-          // T3 exposes GJC presets as `gajae-code/<profile>` model ids. When the
-          // requested model is such a preset, activate the matching GJC model
-          // profile explicitly — SDK mode does not auto-apply the configured
-          // default profile, so without this the session resolves the parent
-          // agent's current model instead of the user's configured default.
-          const profileMatch =
-            frame.model?.match(/^gajae-code\/([a-z0-9-]+)$/i) ??
-            frame.options?.modelProfile?.match(/^([a-z0-9-]+)$/i);
-          if (profileMatch) {
-            try {
-              const activated = await (session as any).activateModelProfileForControl?.(
-                profileMatch[1],
-              );
-              log("activated profile:", profileMatch[1], "->", activated);
-            } catch (error) {
-              log("profile activation failed:", error instanceof Error ? error.message : error);
-            }
           }
           // session.id may not exist on the public surface; fall back to the
           // session state id when present, else a stable per-process marker.
@@ -217,15 +228,21 @@ async function main(): Promise<void> {
         }
         try {
           const raw = frame.model;
-          // T3 model ids of the form gajae-code/<profile> map to GJC model
-          // profiles (presets); switch the active profile instead of calling
-          // setModel with a string the registry cannot resolve.
-          const profileMatch = raw?.match(/^gajae-code\/([a-z0-9-]+)$/i);
-          if (profileMatch) {
-            const activated = await (session as any).activateModelProfileForControl?.(
-              profileMatch[1],
-            );
-            log("model-set activated profile:", profileMatch[1], "->", activated);
+          const profile = profileNameForSelection({ model: raw });
+          if (profile) {
+            if (
+              hasSyntheticProfileNamespaceCollision(
+                session.getAvailableModels() as ReadonlyArray<GjcSelectableModel>,
+                session.modelRegistry.getConfiguredProviderIds(),
+              )
+            ) {
+              throw new Error(
+                "The gajae-code provider namespace is reserved; profile selection is unavailable while it is configured.",
+              );
+            }
+            const activated = await session.activateModelProfileForControl(profile);
+            if (!activated) throw new Error(`Model profile ${profile} could not be activated.`);
+            log("model-set activated profile:", profile);
             send({
               seq: nextSeq(),
               type: "event",
@@ -233,7 +250,12 @@ async function main(): Promise<void> {
             });
             return;
           }
-          await (session as any).setModel(raw, "default", { cause: "user-selection" });
+          const model = findAvailableConcreteModel(
+            session.getAvailableModels() as ReadonlyArray<GjcSelectableModel>,
+            raw,
+          );
+          if (!model) throw new Error(`Model ${raw} is not currently available.`);
+          await (session as any).setModel(model, "default", { cause: "user-selection" });
           send({
             seq: nextSeq(),
             type: "event",

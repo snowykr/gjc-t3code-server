@@ -1,8 +1,37 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { type GjcBridgeClientFrame, type GjcBridgeServerFrame } from "./bridgeProtocol.ts";
+import {
+  findAvailableConcreteModel,
+  hasSyntheticProfileNamespaceCollision,
+  profileNameForSelection,
+} from "./gjcModelSelection.ts";
 
 describe("GjcBridgeProtocol", () => {
+  it("preserves configured profile names outside the legacy slug syntax", () => {
+    expect(profileNameForSelection({ model: "gajae-code/mixed profile/v2" })).toBe(
+      "mixed profile/v2",
+    );
+    expect(profileNameForSelection({ modelProfile: " custom_profile " })).toBe("custom_profile");
+  });
+
+  it("resolves concrete choices to available model objects", () => {
+    const available = [
+      { provider: "cliproxy", id: "gpt-5.6-luna" },
+      { provider: "openai-codex", id: "gpt-5" },
+    ];
+
+    expect(findAvailableConcreteModel(available, "cliproxy/gpt-5.6-luna")).toEqual(available[0]);
+    expect(findAvailableConcreteModel(available, "gajae-code/mixed-high")).toBeUndefined();
+    expect(findAvailableConcreteModel(available, "cliproxy/missing")).toBeUndefined();
+  });
+
+  it("fails closed when a provider claims the synthetic profile namespace", () => {
+    expect(hasSyntheticProfileNamespaceCollision([{ provider: "gajae-code" }], [])).toBe(true);
+    expect(hasSyntheticProfileNamespaceCollision([], ["gajae-code"])).toBe(true);
+    expect(hasSyntheticProfileNamespaceCollision([{ provider: "cliproxy" }], [])).toBe(false);
+  });
+
   it("types session/create with model profile and thinking options", () => {
     const frame: GjcBridgeClientFrame = {
       seq: 1,
