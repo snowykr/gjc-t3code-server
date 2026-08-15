@@ -20,7 +20,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import type { GjcSettings } from "@t3tools/contracts";
 
 import * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
-import { type AcpParsedSessionEvent } from "../acp/AcpRuntimeModel.ts";
+import { type AcpParsedSessionEvent, type AcpSessionModeState } from "../acp/AcpRuntimeModel.ts";
 import type { AcpSessionRuntimeEvent } from "../acp/AcpSessionRuntime.ts";
 import {
   makeGjcBridgeRuntime,
@@ -53,6 +53,8 @@ export const makeGjcBridgeAdapterRuntime = (
       };
     });
 
+    const toolInputs = new Map<string, unknown>();
+
     // Bridge event -> AcpParsedSessionEvent mapping.
     runtime.onEvent((event) => {
       let parsed: AcpParsedSessionEvent | undefined;
@@ -73,30 +75,69 @@ export const makeGjcBridgeAdapterRuntime = (
             rawPayload: { text: event.delta },
           };
           break;
-        case "tool":
+        case "tool": {
+          toolInputs.set(event.toolCallId, event.input);
           parsed = {
             _tag: "ToolCallUpdated",
             toolCall: {
-              toolCallId: `bridge-${event.name}`,
+              toolCallId: event.toolCallId,
+              kind: bridgeToolKind(event.name),
+              title: event.name,
+              ...(event.intent ? { detail: event.intent } : {}),
+              status: "inProgress",
+              data: bridgeToolData(event.toolCallId, event.name, event.input),
+            },
+            rawPayload: {
+              toolCallId: event.toolCallId,
+              name: event.name,
+              input: event.input,
+              ...(event.intent ? { intent: event.intent } : {}),
+            },
+          };
+          break;
+        }
+        case "tool_progress": {
+          toolInputs.set(event.toolCallId, event.input);
+          parsed = {
+            _tag: "ToolCallUpdated",
+            toolCall: {
+              toolCallId: event.toolCallId,
+              kind: bridgeToolKind(event.name),
               title: event.name,
               status: "inProgress",
-              data: event.input as Record<string, unknown>,
+              data: bridgeToolData(event.toolCallId, event.name, event.input, event.output),
             },
-            rawPayload: { name: event.name, input: event.input },
+            rawPayload: {
+              toolCallId: event.toolCallId,
+              name: event.name,
+              input: event.input,
+              output: event.output,
+            },
           };
           break;
-        case "tool_result":
+        }
+        case "tool_result": {
+          const input = toolInputs.get(event.toolCallId) ?? {};
+          toolInputs.delete(event.toolCallId);
           parsed = {
             _tag: "ToolCallUpdated",
             toolCall: {
-              toolCallId: `bridge-${event.name}`,
-              title: event.name,
-              status: "completed",
-              data: event.output as Record<string, unknown>,
+              toolCallId: event.toolCallId,
+              kind: bridgeToolKind(event.name),
+              title: event.isError ? `Failed: ${event.name}` : event.name,
+              status: event.isError ? "failed" : "completed",
+              data: bridgeToolData(event.toolCallId, event.name, input, event.output),
             },
-            rawPayload: { name: event.name, output: event.output },
+            rawPayload: {
+              toolCallId: event.toolCallId,
+              name: event.name,
+              input,
+              output: event.output,
+              isError: event.isError,
+            },
           };
           break;
+        }
         case "task":
           // task states (model-set, interrupted, completed) carry no
           // adapter-visible content; skip them.
@@ -154,7 +195,7 @@ export const makeGjcBridgeAdapterRuntime = (
         });
         yield* Deferred.await(acknowledge);
       }),
-      getModeState: Effect.succeed(undefined),
+      getModeState: Effect.succeed(undefined as AcpSessionModeState | undefined),
       getConfigOptions: Effect.succeed([]),
       prompt: (payload) => {
         const text = extractPromptText(payload);
@@ -205,6 +246,44 @@ export const makeGjcBridgeAdapterRuntime = (
       handleTerminalRelease: () => Effect.void,
     } satisfies AcpSessionRuntime.AcpSessionRuntime["Service"];
   });
+
+function bridgeToolKind(name: string): string {
+  switch (name) {
+    case "bash":
+      return "execute";
+    case "find":
+    case "search":
+      return "search";
+    case "fetch":
+      return "fetch";
+    case "edit":
+    case "write":
+    case "delete":
+    case "move":
+      return name;
+    default:
+      return "dynamic";
+  }
+}
+
+function bridgeToolData(
+  toolCallId: string,
+  name: string,
+  input: unknown,
+  output?: unknown,
+): Record<string, unknown> {
+  const item: Record<string, unknown> = { input };
+  if (output !== undefined) {
+    item.result = output;
+  }
+  return {
+    toolCallId,
+    kind: name,
+    rawInput: input,
+    ...(output !== undefined ? { rawOutput: output } : {}),
+    item,
+  };
+}
 
 function extractPromptText(payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">): string {
   const parts = payload.prompt;

@@ -85,9 +85,8 @@ async function main(): Promise<void> {
             (session.state as unknown as { id?: string })?.id;
           sessionId = rawId || `gjc-${process.pid}`;
 
-          session.subscribe((event: any) => {
-            const bridgeEvent = mapSessionEvent(event);
-            if (bridgeEvent) {
+          session.subscribe((event: unknown) => {
+            for (const bridgeEvent of mapSessionEvents(event)) {
               send({ seq: nextSeq(), type: "event", event: bridgeEvent });
             }
           });
@@ -292,28 +291,97 @@ async function main(): Promise<void> {
   });
 }
 
-/** Map an SDK AgentSessionEvent to the normalized bridge event (or null to skip). */
-function mapSessionEvent(event: any): GjcBridgeSessionEvent | null {
-  if (event?.type === "message_update") {
-    const ev = event.assistantMessageEvent;
-    if (!ev) return null;
-    switch (ev.type) {
-      case "text_delta":
-        return { kind: "text", delta: String(ev.delta ?? "") };
-      case "thinking_delta":
-        return { kind: "thinking", delta: String(ev.delta ?? "") };
-      case "toolcall_start":
-        return { kind: "tool", name: String(ev.name ?? ""), input: ev.input ?? {} };
-      case "toolcall_end":
-        return { kind: "tool_result", name: String(ev.name ?? ""), output: ev.output ?? {} };
-      default:
-        return null;
+/** Project SDK AgentSessionEvents into adapter-visible bridge events. */
+function mapSessionEvents(event: unknown): ReadonlyArray<GjcBridgeSessionEvent> {
+  if (!isRecord(event)) return [];
+
+  switch (event.type) {
+    case "tool_execution_start": {
+      const intent = nonEmptyStringField(event, "intent");
+      return [
+        {
+          kind: "tool",
+          toolCallId: stringField(event, "toolCallId"),
+          name: stringField(event, "toolName"),
+          input: event.args,
+          ...(intent ? { intent } : {}),
+        },
+      ];
     }
+    case "tool_execution_update":
+      return [
+        {
+          kind: "tool_progress",
+          toolCallId: stringField(event, "toolCallId"),
+          name: stringField(event, "toolName"),
+          input: event.args,
+          output: event.partialResult,
+        },
+      ];
+    case "tool_execution_end":
+      return [
+        {
+          kind: "tool_result",
+          toolCallId: stringField(event, "toolCallId"),
+          name: stringField(event, "toolName"),
+          output: event.result,
+          isError: event.isError === true,
+        },
+      ];
+    case "message_update":
+      return mapAssistantMessageUpdate(event.assistantMessageEvent);
+    case "message_end":
+      return mapAssistantMessageEnd(event.message);
+    case "turn_completed":
+      return [{ kind: "task", state: "completed" }];
+    default:
+      return [];
   }
-  if (event?.type === "turn_completed") {
-    return { kind: "task", state: "completed" };
+}
+
+function mapAssistantMessageUpdate(event: unknown): ReadonlyArray<GjcBridgeSessionEvent> {
+  if (!isRecord(event)) return [];
+  switch (event.type) {
+    case "text_delta":
+      return nonEmptyStringField(event, "delta")
+        ? [{ kind: "text", delta: stringField(event, "delta") }]
+        : [];
+    case "thinking_delta":
+    case "reasoning_summary_delta":
+      return nonEmptyStringField(event, "delta")
+        ? [{ kind: "thinking", delta: stringField(event, "delta") }]
+        : [];
+    default:
+      // Tool-call streaming events describe the model's proposed call. The
+      // subsequent tool_execution lifecycle has the stable call id, intent,
+      // actual arguments, and result; project only that canonical lifecycle.
+      return [];
   }
-  return null;
+}
+
+function mapAssistantMessageEnd(message: unknown): ReadonlyArray<GjcBridgeSessionEvent> {
+  if (!isRecord(message) || message.role !== "assistant" || !Array.isArray(message.content)) {
+    return [];
+  }
+  return message.content.flatMap((part) => {
+    if (!isRecord(part) || part.type !== "thinking") return [];
+    const text = nonEmptyStringField(part, "summaryText") ?? nonEmptyStringField(part, "thinking");
+    return text ? [{ kind: "thinking" as const, delta: text }] : [];
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function stringField(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  return typeof value === "string" ? value : "";
+}
+
+function nonEmptyStringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = stringField(record, key).trim();
+  return value.length > 0 ? value : undefined;
 }
 
 main().catch((error) => {

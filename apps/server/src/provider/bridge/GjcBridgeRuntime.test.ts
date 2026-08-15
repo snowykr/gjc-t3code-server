@@ -32,4 +32,44 @@ describe("GjcBridgeProtocol", () => {
     };
     expect(event.type).toBe("event");
   });
+
+  it("preserves SDK tool execution identity, arguments, output, and failure", () => {
+    const started: GjcBridgeServerFrame = {
+      seq: 4,
+      type: "event",
+      event: {
+        kind: "tool",
+        toolCallId: "call-find-1",
+        name: "find",
+        input: { paths: ["src/**/*.ts"] },
+        intent: "Finding TypeScript files",
+      },
+    };
+    const updated: GjcBridgeServerFrame = {
+      seq: 5,
+      type: "event",
+      event: {
+        kind: "tool_progress",
+        toolCallId: "call-find-1",
+        name: "find",
+        input: { paths: ["src/**/*.ts"] },
+        output: { matches: ["src/example.ts"] },
+      },
+    };
+    const completed: GjcBridgeServerFrame = {
+      seq: 6,
+      type: "event",
+      event: {
+        kind: "tool_result",
+        toolCallId: "call-find-1",
+        name: "find",
+        output: { matches: ["src/example.ts"] },
+        isError: false,
+      },
+    };
+
+    expect(started.event).toMatchObject({ kind: "tool", toolCallId: "call-find-1" });
+    expect(updated.event).toMatchObject({ kind: "tool_progress", name: "find" });
+    expect(completed.event).toMatchObject({ kind: "tool_result", isError: false });
+  });
 });

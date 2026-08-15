@@ -133,8 +133,27 @@ export interface GjcBridgeEvent extends BridgeFrameBase {
 export type GjcBridgeSessionEvent =
   | { readonly kind: "text"; readonly delta: string }
   | { readonly kind: "thinking"; readonly delta: string }
-  | { readonly kind: "tool"; readonly name: string; readonly input: unknown }
-  | { readonly kind: "tool_result"; readonly name: string; readonly output: unknown }
+  | {
+      readonly kind: "tool";
+      readonly toolCallId: string;
+      readonly name: string;
+      readonly input: unknown;
+      readonly intent?: string;
+    }
+  | {
+      readonly kind: "tool_progress";
+      readonly toolCallId: string;
+      readonly name: string;
+      readonly input: unknown;
+      readonly output: unknown;
+    }
+  | {
+      readonly kind: "tool_result";
+      readonly toolCallId: string;
+      readonly name: string;
+      readonly output: unknown;
+      readonly isError: boolean;
+    }
   | { readonly kind: "task"; readonly state: string; readonly detail?: string };
 
 export interface GjcBridgePermissionRequest extends BridgeFrameBase {
