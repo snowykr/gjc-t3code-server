@@ -1,5 +1,9 @@
 const SYNTHETIC_PROVIDER_ID = "gajae-code";
 
+export function isSyntheticNamespaceProviderId(providerId: string): boolean {
+  return providerId === SYNTHETIC_PROVIDER_ID || providerId.startsWith(`${SYNTHETIC_PROVIDER_ID}/`);
+}
+
 export interface GjcSelectableModel {
   readonly provider: string;
   readonly id: string;
@@ -41,7 +45,7 @@ export function hasSyntheticProfileNamespaceCollision(
   configuredProviderIds: readonly string[],
 ): boolean {
   return (
-    models.some((model) => model.provider === SYNTHETIC_PROVIDER_ID) ||
-    configuredProviderIds.includes(SYNTHETIC_PROVIDER_ID)
+    models.some((model) => isSyntheticNamespaceProviderId(model.provider)) ||
+    configuredProviderIds.some(isSyntheticNamespaceProviderId)
   );
 }

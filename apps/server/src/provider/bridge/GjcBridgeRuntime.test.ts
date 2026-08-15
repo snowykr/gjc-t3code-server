@@ -44,7 +44,11 @@ describe("GjcBridgeProtocol", () => {
 
   it("fails closed when a provider claims the synthetic profile namespace", () => {
     expect(hasSyntheticProfileNamespaceCollision([{ provider: "gajae-code" }], [])).toBe(true);
+    expect(hasSyntheticProfileNamespaceCollision([{ provider: "gajae-code/extension" }], [])).toBe(
+      true,
+    );
     expect(hasSyntheticProfileNamespaceCollision([], ["gajae-code"])).toBe(true);
+    expect(hasSyntheticProfileNamespaceCollision([], ["gajae-code/extension"])).toBe(true);
     expect(hasSyntheticProfileNamespaceCollision([{ provider: "cliproxy" }], [])).toBe(false);
   });
 

@@ -12,6 +12,7 @@ import type {
 import {
   findAvailableConcreteModel,
   hasSyntheticProfileNamespaceCollision,
+  isSyntheticNamespaceProviderId,
   profileNameForSelection,
   selectionInputError,
   type GjcSelectableModel,
@@ -146,7 +147,7 @@ async function main(): Promise<void> {
               activeSession.modelRegistry.getConfiguredProviderIds(),
             );
             const concreteOptions = sdkModels
-              .filter((model) => model.provider !== "gajae-code")
+              .filter((model) => !isSyntheticNamespaceProviderId(model.provider))
               .map((m) => ({
                 value: `${m.provider}/${m.id}`,
                 name: String(m.name ?? `${m.provider}/${m.id}`),

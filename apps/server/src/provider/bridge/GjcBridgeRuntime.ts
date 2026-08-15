@@ -119,7 +119,10 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
   // Pending request resolvers keyed by requestId (permission/user-input).
   const pendingRequests = new Map<string, (frame: GjcBridgeServerFrame) => void>();
   // Prompt completion resolvers: one in-flight prompt at a time, keyed by seq.
-  const pendingPrompts = new Map<number, () => void>();
+  const pendingPrompts = new Map<
+    number,
+    { readonly resolve: () => void; readonly reject: (error: GjcBridgeError) => void }
+  >();
 
   let readyResolve: (() => void) | null = null;
   let readyReject: ((error: GjcBridgeError) => void) | null = null;
@@ -157,6 +160,14 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
         } else {
           const error = new GjcBridgeError(message, frame.code);
           rejectReady(error);
+          if (frame.code === "prompt" && pendingPrompts.size > 0) {
+            const [seqKey, pending] = pendingPrompts.entries().next().value as [
+              number,
+              { readonly resolve: () => void; readonly reject: (error: GjcBridgeError) => void },
+            ];
+            pendingPrompts.delete(seqKey);
+            pending.reject(error);
+          }
         }
         break;
       }
@@ -188,9 +199,12 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
       case "turn/terminal": {
         // Resolve the in-flight prompt (if any) first.
         if (pendingPrompts.size > 0) {
-          const [seqKey, resolve] = pendingPrompts.entries().next().value as [number, () => void];
+          const [seqKey, pending] = pendingPrompts.entries().next().value as [
+            number,
+            { readonly resolve: () => void; readonly reject: (error: GjcBridgeError) => void },
+          ];
           pendingPrompts.delete(seqKey);
-          resolve();
+          pending.resolve();
         }
         for (const listener of eventListeners) {
           try {
@@ -261,9 +275,12 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
     prompt: (options) =>
       Effect.tryPromise({
         try: () =>
-          new Promise<void>((resolve) => {
+          new Promise<void>((resolve, reject) => {
             const promptSeq = nextSeq();
-            pendingPrompts.set(promptSeq, () => resolve());
+            pendingPrompts.set(promptSeq, {
+              resolve,
+              reject: (error) => reject(error),
+            });
             send({
               seq: promptSeq,
               type: "session/prompt",
@@ -278,9 +295,12 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
     steer: (text) =>
       Effect.tryPromise({
         try: () =>
-          new Promise<void>((resolve) => {
+          new Promise<void>((resolve, reject) => {
             const steerSeq = nextSeq();
-            pendingPrompts.set(steerSeq, () => resolve());
+            pendingPrompts.set(steerSeq, {
+              resolve,
+              reject: (error) => reject(error),
+            });
             send({ seq: steerSeq, type: "session/steer", text });
           }),
         catch: (error) => new GjcBridgeError(String(error)),
