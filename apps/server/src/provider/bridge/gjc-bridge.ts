@@ -197,6 +197,13 @@ async function main(): Promise<void> {
         }
         try {
           await session.prompt(frame.text);
+          // The SDK prompt resolves when the turn completes; signal the
+          // terminal frame so the node side can settle the adapter turn.
+          send({
+            seq: nextSeq(),
+            type: "turn/terminal",
+            stopReason: "end_turn",
+          });
         } catch (error) {
           send({
             seq: nextSeq(),

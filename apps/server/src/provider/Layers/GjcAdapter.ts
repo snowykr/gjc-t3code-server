@@ -65,6 +65,7 @@ import {
   makeGjcAcpRuntime,
   resolveGjcAcpBaseModelId,
 } from "../acp/GjcAcpSupport.ts";
+import { makeGjcBridgeAdapterRuntime } from "../bridge/GjcBridgeAdapterRuntime.ts";
 import {
   extractXAiAskUserQuestions,
   makeXAiAskUserQuestionCancelledResponse,
@@ -90,6 +91,12 @@ export interface GjcAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly instanceId?: ProviderInstanceId;
+  /**
+   * Use the in-process GJC SDK bridge instead of the `gjc acp` subprocess.
+   * Defaults to true in production; tests that exercise the ACP mock agent
+   * pass false to keep the `gjc acp` spawn path.
+   */
+  readonly useBridge?: boolean;
 }
 
 interface PendingApproval {
@@ -713,32 +720,40 @@ export function makeGjcAdapter(gjcSettings: GjcSettings, options?: GjcAdapterLiv
           });
 
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
-          const acp = yield* makeGjcAcpRuntime({
-            gjcSettings,
-            ...(options?.environment ? { environment: options.environment } : {}),
-            childProcessSpawner,
-            cwd,
-            ...(resumeSessionId ? { resumeSessionId } : {}),
-            clientInfo: { name: "t3-code", version: "0.0.0" },
-            ...(mcpSession
-              ? {
-                  mcpServers: [
-                    {
-                      type: "http" as const,
-                      name: "t3-code",
-                      url: mcpSession.endpoint,
-                      headers: [
-                        {
-                          name: "Authorization",
-                          value: mcpSession.authorizationHeader,
-                        },
-                      ],
-                    },
-                  ],
-                }
-              : {}),
-            ...acpNativeLoggers,
-          }).pipe(
+          const acp = yield* (
+            options?.useBridge === false
+              ? makeGjcAcpRuntime({
+                  gjcSettings,
+                  ...(options?.environment ? { environment: options.environment } : {}),
+                  childProcessSpawner,
+                  cwd,
+                  ...(resumeSessionId ? { resumeSessionId } : {}),
+                  clientInfo: { name: "t3-code", version: "0.0.0" },
+                  ...(mcpSession
+                    ? {
+                        mcpServers: [
+                          {
+                            type: "http" as const,
+                            name: "t3-code",
+                            url: mcpSession.endpoint,
+                            headers: [
+                              {
+                                name: "Authorization",
+                                value: mcpSession.authorizationHeader,
+                              },
+                            ],
+                          },
+                        ],
+                      }
+                    : {}),
+                  ...acpNativeLoggers,
+                })
+              : makeGjcBridgeAdapterRuntime({
+                  gjcSettings,
+                  ...(options?.environment ? { environment: options.environment } : {}),
+                  cwd,
+                })
+          ).pipe(
             Effect.provideService(Crypto.Crypto, crypto),
             Effect.provideService(Scope.Scope, sessionScope),
             Effect.mapError(

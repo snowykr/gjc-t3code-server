@@ -87,7 +87,9 @@ const gjcAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
 const makeTestAdapter = (binaryPath: string, options?: Parameters<typeof makeGjcAdapter>[1]) =>
-  makeGjcAdapter(decodeGjcSettings({ binaryPath }), options).pipe(Effect.orDie);
+  makeGjcAdapter(decodeGjcSettings({ binaryPath }), { useBridge: false, ...options }).pipe(
+    Effect.orDie,
+  );
 
 function collectGjcTaskLifecycleEvents(mode: string, reason?: string) {
   return Effect.gen(function* () {

@@ -8,7 +8,9 @@
  */
 // @effect-diagnostics-next-line nodeBuiltinImport:off - bridge child process spawn
 import * as ChildProcess from "node:child_process";
-// @effect-diagnostics-next-line nodeBuiltinImport:off - bridge child path
+// @effect-diagnostics-next-line nodeBuiltinImport:off - bridge entry path probe
+import * as NodeFS from "node:fs";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - bridge entry path
 import * as NodePath from "node:path";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - bridge stdout line reader
 import * as Readline from "node:readline";
@@ -29,6 +31,7 @@ export interface GjcBridgeCreateOptions {
     readonly skipPythonPreflight?: boolean;
     readonly disableExtensionDiscovery?: boolean;
     readonly agentDir?: string;
+    readonly thinkingLevel?: string;
   };
 }
 
@@ -61,7 +64,7 @@ export interface GjcBridgeRuntime {
 }
 
 // @effect-diagnostics-next-line nodeBuiltinImport:off - bridge child path
-const BRIDGE_ENTRY = NodePath.join(import.meta.dirname, "gjc-bridge.ts");
+const BRIDGE_ENTRY = resolveBridgeEntry();
 
 const resolveBun = (): string => {
   const candidates: ReadonlyArray<string> = [
@@ -71,6 +74,23 @@ const resolveBun = (): string => {
   ];
   return candidates.find((candidate) => candidate.length > 0) ?? "bun";
 };
+
+function resolveBridgeEntry(): string {
+  // Bundled server runs from apps/server/dist (dirname = apps/server/dist);
+  // source runs from apps/server/src/provider/bridge. The bridge script is
+  // not bundled (it must run under bun with the SDK's .ts sources), so
+  // resolve it from the repo layout in either case.
+  const candidates = [
+    // dist -> apps/server/src/provider/bridge/gjc-bridge.ts
+    NodePath.join(import.meta.dirname, "..", "src", "provider", "bridge", "gjc-bridge.ts"),
+    // source dir is already apps/server/src/provider/bridge
+    NodePath.join(import.meta.dirname, "gjc-bridge.ts"),
+  ];
+  for (const candidate of candidates) {
+    if (NodeFS.existsSync(candidate)) return candidate;
+  }
+  return candidates[0]!;
+}
 
 export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
   let seq = 0;
@@ -95,6 +115,8 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
 
   // Pending request resolvers keyed by requestId (permission/user-input).
   const pendingRequests = new Map<string, (frame: GjcBridgeServerFrame) => void>();
+  // Prompt completion resolvers: one in-flight prompt at a time, keyed by seq.
+  const pendingPrompts = new Map<number, () => void>();
 
   let readyResolve: (() => void) | null = null;
   let readyReject: ((error: GjcBridgeError) => void) | null = null;
@@ -158,7 +180,13 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
         }
         break;
       }
-      case "turn/terminal":
+      case "turn/terminal": {
+        // Resolve the in-flight prompt (if any) first.
+        if (pendingPrompts.size > 0) {
+          const [seqKey, resolve] = pendingPrompts.entries().next().value as [number, () => void];
+          pendingPrompts.delete(seqKey);
+          resolve();
+        }
         for (const listener of eventListeners) {
           try {
             listener({ kind: "task", state: "completed", detail: frame.stopReason });
@@ -167,6 +195,7 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
           }
         }
         break;
+      }
       default:
         break;
     }
@@ -224,19 +253,31 @@ export const makeGjcBridgeRuntime = (): GjcBridgeRuntime => {
         send({ seq: nextSeq(), type: "session/model-set", model });
       }),
     prompt: (options) =>
-      Effect.sync(() => {
-        send({
-          seq: nextSeq(),
-          type: "session/prompt",
-          text: options.text,
-          ...(options.attachments && options.attachments.length > 0
-            ? { attachments: options.attachments }
-            : {}),
-        });
+      Effect.tryPromise({
+        try: () =>
+          new Promise<void>((resolve) => {
+            const promptSeq = nextSeq();
+            pendingPrompts.set(promptSeq, () => resolve());
+            send({
+              seq: promptSeq,
+              type: "session/prompt",
+              text: options.text,
+              ...(options.attachments && options.attachments.length > 0
+                ? { attachments: options.attachments }
+                : {}),
+            });
+          }),
+        catch: (error) => new GjcBridgeError(String(error)),
       }),
     steer: (text) =>
-      Effect.sync(() => {
-        send({ seq: nextSeq(), type: "session/steer", text });
+      Effect.tryPromise({
+        try: () =>
+          new Promise<void>((resolve) => {
+            const steerSeq = nextSeq();
+            pendingPrompts.set(steerSeq, () => resolve());
+            send({ seq: steerSeq, type: "session/steer", text });
+          }),
+        catch: (error) => new GjcBridgeError(String(error)),
       }),
     interrupt: () =>
       Effect.sync(() => {
