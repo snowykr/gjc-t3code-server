@@ -1,4 +1,8 @@
 import { createAgentSession } from "@gajae-code/coding-agent/sdk/session";
+import {
+  BUILTIN_MODEL_PROFILES,
+  formatModelProfileDisplayLabel,
+} from "@gajae-code/coding-agent/config/model-profiles";
 import type {
   GjcBridgeClientFrame,
   GjcBridgeServerFrame,
@@ -73,21 +77,26 @@ async function main(): Promise<void> {
             | undefined;
           try {
             const sdkModels = (session as any).getAvailableModels?.() ?? [];
-            if (Array.isArray(sdkModels)) {
-              const modelOptions = sdkModels.map((m: any) => ({
-                value: `${m.provider}/${m.id}`,
-                name: String(m.name ?? `${m.provider}/${m.id}`),
-              }));
-              if (modelOptions.length > 0) {
-                configOptions = [
-                  {
-                    id: "model",
-                    name: "Model",
-                    type: "select" as const,
-                    options: modelOptions,
-                  },
-                ];
-              }
+            const profileOptions = BUILTIN_MODEL_PROFILES.map((profile) => ({
+              value: `gajae-code/${profile.name}`,
+              name: formatModelProfileDisplayLabel(profile),
+            }));
+            const concreteOptions = Array.isArray(sdkModels)
+              ? sdkModels.map((m: any) => ({
+                  value: `${m.provider}/${m.id}`,
+                  name: String(m.name ?? `${m.provider}/${m.id}`),
+                }))
+              : [];
+            const allOptions = [...profileOptions, ...concreteOptions];
+            if (allOptions.length > 0) {
+              configOptions = [
+                {
+                  id: "model",
+                  name: "Model",
+                  type: "select" as const,
+                  options: allOptions,
+                },
+              ];
             }
           } catch {
             // Model discovery is best-effort; a failed lookup must not block ready.
