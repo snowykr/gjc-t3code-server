@@ -387,10 +387,9 @@ export const checkGjcProviderStatus = Effect.fn("checkGjcProviderStatus")(functi
     const authenticationFailure = isGjcAuthenticationFailureCause(discoveryExit.cause);
     const pretty = Cause.pretty(discoveryExit.cause);
     const requestError = Option.getOrUndefined(
-      Cause.find(discoveryExit.cause, (u) =>
-        Schema.is(EffectAcpErrors.AcpRequestError)(u as never)
-          ? Option.some(u as EffectAcpErrors.AcpRequestError)
-          : Option.none(),
+      Option.filter(
+        Cause.findErrorOption(discoveryExit.cause),
+        Schema.is(EffectAcpErrors.AcpRequestError),
       ),
     );
     const brokerDetail =

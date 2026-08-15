@@ -1,6 +1,9 @@
 import { createAgentSession } from "@gajae-code/coding-agent/sdk/session";
 import { isModelProfileProviderAvailable } from "@gajae-code/coding-agent/config/model-profile-contract";
-import { formatModelProfileDisplayLabel } from "@gajae-code/coding-agent/config/model-profiles";
+import {
+  formatModelProfileDisplayLabel,
+  type ModelProfileDefinition,
+} from "@gajae-code/coding-agent/config/model-profiles";
 import type {
   GjcBridgeClientFrame,
   GjcBridgeServerFrame,
@@ -92,7 +95,13 @@ async function main(): Promise<void> {
                     )
                 : [],
             );
-            const profileOptions = Array.from(session.modelRegistry.getModelProfiles().values())
+            // The SDK session owns the merged registry: its profile map includes
+            // both built-ins and ~/.gjc/agent/models.yml definitions.
+            const profiles = session.modelRegistry.getModelProfiles() as ReadonlyMap<
+              string,
+              ModelProfileDefinition
+            >;
+            const profileOptions = Array.from(profiles.values())
               .filter((profile) => isModelProfileProviderAvailable(profile, availableProviders))
               .map((profile) => ({
                 value: `gajae-code/${profile.name}`,
@@ -419,7 +428,7 @@ function mapAssistantMessageEnd(message: unknown): ReadonlyArray<GjcBridgeSessio
   if (!isRecord(message) || message.role !== "assistant" || !Array.isArray(message.content)) {
     return [];
   }
-  return message.content.flatMap((part) => {
+  return message.content.flatMap<GjcBridgeSessionEvent>((part) => {
     if (!isRecord(part) || part.type !== "thinking") return [];
     const summaryText = nonEmptyStringField(part, "summaryText");
     if (summaryText) return [{ kind: "reasoning_summary" as const, delta: summaryText }];
