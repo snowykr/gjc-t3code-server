@@ -1,16 +1,17 @@
 # GJC Provider Integration: Gap Analysis
 
-Status: investigation complete, verified 2026-08-13 against `gjc` 0.13.2 and this repo's `main`.
+Status: SDK-bridge primary (2026-08-15), discovery is SDK 2.5s → ACP 60s fallback; ACP verified 2026-08-13 against `gjc` 0.13.2. `gjc acp` remains the durable fallback, not the primary path.
 
 ## Context
 
 The goal is to run [Gajae Code](https://github.com/Yeachan-Heo/gajae-code) (GJC) as a first-class T3 Code
 provider, covering session operation, thinking flow, tool calls, subagents, cancel, steer, session
-linking, and mobile support. T3 Code already ships a generic ACP runtime
-(`apps/server/src/provider/acp/`, used by the Cursor and Grok adapters), and GJC ships a conformant
-ACP v1 endpoint (`gjc acp`) plus an SDK v3 control bus. The integration is therefore feasible, and
-most capabilities map cleanly onto the existing ACP pipeline. This document records the four
-identified gaps, with exact code paths on both sides and options for closing each one.
+linking, and mobile support. T3 Code ships a generic ACP runtime
+(`apps/server/src/provider/acp/`, used by the Cursor and Grok adapters), and the GJC adapter now uses the SDK bridge (`apps/server/src/provider/bridge/GjcBridgeRuntime.ts`, `apps/server/src/provider/bridge/gjc-bridge.ts`) as the primary path with ACP (`apps/server/src/provider/acp/GjcAcpSupport.ts`) as fallback. GJC ships a conformant
+ACP v1 endpoint (`gjc acp`) plus an SDK v3 control bus. This document records the four
+identified gaps and the current status after the SDK-primary switch.
+
+### Verification evidence
 
 ### Verification evidence
 
