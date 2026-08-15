@@ -67,6 +67,12 @@ export type GjcTaskLifecycleBoundary =
       readonly agentName: string;
       readonly requestedTaskIds: ReadonlyArray<string>;
       readonly subagentCount: number;
+      readonly agentId?: string;
+      readonly parentToolUseId?: string;
+      readonly parentAgentId?: string;
+      readonly depth?: number;
+      readonly title?: string;
+      readonly subagentType?: string;
     }
   | {
       readonly kind: "completed";
@@ -76,12 +82,24 @@ export type GjcTaskLifecycleBoundary =
        * others failed to schedule. The terminal must be failed/stopped, not
        * a clean completion. */
       readonly reason?: GjcTaskLifecycleReason;
+      readonly agentId?: string;
+      readonly parentToolUseId?: string;
+      readonly parentAgentId?: string;
+      readonly depth?: number;
+      readonly title?: string;
+      readonly subagentType?: string;
     }
   | {
       readonly kind: "fallback";
       readonly requestedTaskIds: ReadonlyArray<string>;
       readonly subagentCount: number;
       readonly reason: GjcTaskLifecycleReason;
+      readonly agentId?: string;
+      readonly parentToolUseId?: string;
+      readonly parentAgentId?: string;
+      readonly depth?: number;
+      readonly title?: string;
+      readonly subagentType?: string;
     };
 
 export interface AcpToolCallState {
@@ -369,6 +387,33 @@ export function readGjcTaskLifecycleBoundary(
     gjc.reason === "no_allocated_agent_ids"
       ? gjc.reason
       : undefined;
+  const agentId =
+    typeof gjc.agentId === "string" && gjc.agentId.trim() ? gjc.agentId.trim() : undefined;
+  const parentToolUseId =
+    typeof gjc.parentToolUseId === "string" && gjc.parentToolUseId.trim()
+      ? gjc.parentToolUseId.trim()
+      : undefined;
+  const parentAgentId =
+    typeof gjc.parentAgentId === "string" && gjc.parentAgentId.trim()
+      ? gjc.parentAgentId.trim()
+      : undefined;
+  const depth =
+    typeof gjc.depth === "number" && Number.isInteger(gjc.depth) && gjc.depth >= 0
+      ? gjc.depth
+      : undefined;
+  const title = typeof gjc.title === "string" && gjc.title.trim() ? gjc.title.trim() : undefined;
+  const subagentType =
+    typeof gjc.subagentType === "string" && gjc.subagentType.trim()
+      ? gjc.subagentType.trim()
+      : undefined;
+  const hierarchy: Record<string, unknown> = {
+    ...(agentId ? { agentId } : {}),
+    ...(parentToolUseId ? { parentToolUseId } : {}),
+    ...(parentAgentId ? { parentAgentId } : {}),
+    ...(depth !== undefined ? { depth } : {}),
+    ...(title ? { title } : {}),
+    ...(subagentType ? { subagentType } : {}),
+  };
 
   // Allocated ids are terminal metadata and take precedence over repeated
   // start fields on an end update. A coexisting reason marks a PARTIAL
@@ -380,7 +425,8 @@ export function readGjcTaskLifecycleBoundary(
       agentIds,
       subagentCount: normalizeSubagentCount(gjc.subagentCount, agentIds.length),
       ...(reason !== undefined ? { reason } : {}),
-    };
+      ...hierarchy,
+    } as GjcTaskLifecycleBoundary;
   }
 
   // Failure terminals carry the requested ids even when the opaque agent name
@@ -391,7 +437,8 @@ export function readGjcTaskLifecycleBoundary(
       requestedTaskIds,
       subagentCount: normalizeSubagentCount(gjc.subagentCount, requestedTaskIds.length),
       reason,
-    };
+      ...hierarchy,
+    } as GjcTaskLifecycleBoundary;
   }
 
   const sessionUpdate =
@@ -407,7 +454,8 @@ export function readGjcTaskLifecycleBoundary(
       requestedTaskIds,
       subagentCount: requestedTaskIds.length,
       reason: "no_allocated_agent_ids",
-    };
+      ...hierarchy,
+    } as GjcTaskLifecycleBoundary;
   }
 
   if (!requestedTaskIds || !agentName) {
@@ -419,7 +467,8 @@ export function readGjcTaskLifecycleBoundary(
     agentName,
     requestedTaskIds,
     subagentCount: normalizeSubagentCount(gjc.subagentCount, requestedTaskIds.length),
-  };
+    ...hierarchy,
+  } as GjcTaskLifecycleBoundary;
 }
 
 function canonicalItemTypeFromAcpToolKind(kind: string | undefined): ToolLifecycleItemType {

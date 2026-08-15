@@ -16,6 +16,17 @@ const exitLogPath = process.env.T3_ACP_EXIT_LOG_PATH;
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const gjcTaskLifecycleMode = process.env.T3_ACP_GJC_TASK_LIFECYCLE;
 const gjcTaskLifecycleReason = process.env.T3_ACP_GJC_TASK_REASON ?? "scheduling_failed";
+const emitGjcTaskHierarchy = process.env.T3_ACP_GJC_TASK_HIERARCHY === "1";
+const gjcTaskHierarchy = emitGjcTaskHierarchy
+  ? {
+      agentId: "agent-child-1",
+      parentToolUseId: "tool-parent-1",
+      parentAgentId: "agent-parent-1",
+      depth: 2,
+      title: "Nested child",
+      subagentType: "reviewer",
+    }
+  : {};
 const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
 const emitGenericToolPlaceholders = process.env.T3_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
@@ -644,6 +655,7 @@ const program = Effect.gen(function* () {
                   agentName: "batch-agent",
                   requestedTaskIds,
                   subagentCount: requestedTaskIds.length,
+                  ...gjcTaskHierarchy,
                 },
               },
           update: {
@@ -674,6 +686,7 @@ const program = Effect.gen(function* () {
                   requestedTaskIds,
                   agentIds: ["allocated-a", "allocated-b"],
                   subagentCount: requestedTaskIds.length,
+                  ...gjcTaskHierarchy,
                 },
               }
             : gjcTaskLifecycleMode === "partial"
@@ -683,6 +696,7 @@ const program = Effect.gen(function* () {
                     agentIds: ["allocated-a"],
                     subagentCount: requestedTaskIds.length,
                     reason: gjcTaskLifecycleReason,
+                    ...gjcTaskHierarchy,
                   },
                 }
               : {
@@ -690,6 +704,7 @@ const program = Effect.gen(function* () {
                     requestedTaskIds,
                     subagentCount: requestedTaskIds.length,
                     reason: gjcTaskLifecycleReason,
+                    ...gjcTaskHierarchy,
                   },
                 };
         yield* agent.client.sessionUpdate({

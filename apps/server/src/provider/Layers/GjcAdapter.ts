@@ -138,6 +138,12 @@ interface GjcSessionContext {
 interface GjcTaskLifecycleState {
   readonly agentName: string;
   readonly requestedTaskIds: ReadonlyArray<string>;
+  readonly agentId?: string;
+  readonly parentToolUseId?: string;
+  readonly parentAgentId?: string;
+  readonly depth?: number;
+  readonly title?: string;
+  readonly subagentType?: string;
   terminal: boolean;
 }
 
@@ -546,6 +552,12 @@ export function makeGjcAdapter(gjcSettings: GjcSettings, options?: GjcAdapterLiv
           ctx.taskLifecycles.set(toolCallId, {
             agentName: boundary.agentName,
             requestedTaskIds: boundary.requestedTaskIds,
+            agentId: boundary.agentId,
+            parentToolUseId: boundary.parentToolUseId,
+            parentAgentId: boundary.parentAgentId,
+            depth: boundary.depth,
+            title: boundary.title,
+            subagentType: boundary.subagentType,
             terminal: false,
           });
           yield* offerRuntimeEvent({
@@ -561,6 +573,12 @@ export function makeGjcAdapter(gjcSettings: GjcSettings, options?: GjcAdapterLiv
               taskType: "subagent",
               requestedTaskIds: boundary.requestedTaskIds,
               subagentCount: boundary.subagentCount,
+              ...(boundary.agentId ? { agentId: boundary.agentId } : {}),
+              ...(boundary.parentToolUseId ? { parentToolUseId: boundary.parentToolUseId } : {}),
+              ...(boundary.parentAgentId ? { parentAgentId: boundary.parentAgentId } : {}),
+              ...(boundary.depth !== undefined ? { agentIndex: boundary.depth } : {}),
+              ...(boundary.title ? { title: boundary.title } : {}),
+              ...(boundary.subagentType ? { role: boundary.subagentType } : {}),
             },
           });
           return;
@@ -586,6 +604,24 @@ export function makeGjcAdapter(gjcSettings: GjcSettings, options?: GjcAdapterLiv
               requestedTaskIds: existing.requestedTaskIds,
               agentIds: boundary.agentIds,
               subagentCount: boundary.subagentCount,
+              ...((boundary.agentId ?? existing.agentId)
+                ? { agentId: (boundary.agentId ?? existing.agentId)! }
+                : {}),
+              ...((boundary.parentToolUseId ?? existing.parentToolUseId)
+                ? { parentToolUseId: (boundary.parentToolUseId ?? existing.parentToolUseId)! }
+                : {}),
+              ...((boundary.parentAgentId ?? existing.parentAgentId)
+                ? { parentAgentId: (boundary.parentAgentId ?? existing.parentAgentId)! }
+                : {}),
+              ...((boundary.depth ?? existing.depth !== undefined)
+                ? { agentIndex: (boundary.depth ?? existing.depth)! }
+                : {}),
+              ...((boundary.title ?? existing.title)
+                ? { title: (boundary.title ?? existing.title)! }
+                : {}),
+              ...((boundary.subagentType ?? existing.subagentType)
+                ? { role: (boundary.subagentType ?? existing.subagentType)! }
+                : {}),
               ...(partialReason ? { reason: partialReason, allocatedIdsUnavailable: false } : {}),
             },
           });
@@ -605,6 +641,22 @@ export function makeGjcAdapter(gjcSettings: GjcSettings, options?: GjcAdapterLiv
             taskType: "subagent",
             requestedTaskIds: boundary.requestedTaskIds,
             subagentCount: boundary.subagentCount,
+            ...((boundary.agentId ?? existing.agentId)
+              ? { agentId: (boundary.agentId ?? existing.agentId)! }
+              : {}),
+            ...((boundary.parentToolUseId ?? existing.parentToolUseId)
+              ? { parentToolUseId: (boundary.parentToolUseId ?? existing.parentToolUseId)! }
+              : {}),
+            ...(existing.parentAgentId ? { parentAgentId: existing.parentAgentId } : {}),
+            ...((boundary.depth ?? existing.depth !== undefined)
+              ? { agentIndex: (boundary.depth ?? existing.depth)! }
+              : {}),
+            ...((boundary.title ?? existing.title)
+              ? { title: (boundary.title ?? existing.title)! }
+              : {}),
+            ...((boundary.subagentType ?? existing.subagentType)
+              ? { role: (boundary.subagentType ?? existing.subagentType)! }
+              : {}),
             allocatedIdsUnavailable: true,
             reason: boundary.reason,
           },
