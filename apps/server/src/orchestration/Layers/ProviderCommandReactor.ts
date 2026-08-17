@@ -1258,13 +1258,26 @@ const make = Effect.gen(function* () {
       });
     }
 
-    // Orchestration turn ids are not provider turn ids, so interrupt by session.
-    if (event.payload.turnId !== undefined) {
-      yield* checkpointReactor.registerAbortCheckpoint({
+    if (
+      thread.session?.status !== "running" ||
+      event.payload.turnId === undefined ||
+      thread.session.activeTurnId !== event.payload.turnId
+    ) {
+      return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
-        turnId: event.payload.turnId,
+        kind: "provider.turn.interrupt.failed",
+        summary: "Provider turn interrupt skipped",
+        detail: `Stale interrupt turn '${event.payload.turnId ?? "missing"}'; live turn is '${thread.session?.activeTurnId ?? "none"}'.`,
+        turnId: event.payload.turnId ?? null,
+        createdAt: event.payload.createdAt,
       });
     }
+
+    // Orchestration turn ids are not provider turn ids, so interrupt by session.
+    yield* checkpointReactor.registerAbortCheckpoint({
+      threadId: event.payload.threadId,
+      turnId: event.payload.turnId,
+    });
     yield* providerService.interruptTurn({ threadId: event.payload.threadId });
   });
 
