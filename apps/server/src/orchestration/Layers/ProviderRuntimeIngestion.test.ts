@@ -821,6 +821,78 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread?.latestTurn?.state).toBe("running");
   });
 
+  it("ignores turn.aborted without an active turn and retains a pending start", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const pendingTurnId = asTurnId("turn-pending-after-abort");
+    const requestedAt = "2026-01-01T00:00:01.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-pending-after-abort"),
+      threadId,
+      message: {
+        messageId: asMessageId("message-pending-after-abort"),
+        role: "user",
+        text: "start after stale abort",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: requestedAt,
+    });
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-starting-pending-after-abort"),
+      threadId,
+      session: {
+        threadId,
+        status: "starting",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:02.000Z",
+      },
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+
+    harness.emit({
+      type: "turn.aborted",
+      eventId: asEventId("evt-turn-aborted-before-pending-start"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId: asTurnId("turn-stale-before-pending-start"),
+      payload: { reason: "stale interruption" },
+    });
+
+    await harness.drain();
+    let thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.session?.status).toBe("starting");
+    expect(thread?.session?.activeTurnId).toBeNull();
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-pending-after-abort"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:04.000Z",
+      threadId,
+      turnId: pendingTurnId,
+      payload: {},
+    });
+
+    thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "running" &&
+        entry.session.activeTurnId === pendingTurnId &&
+        entry.latestTurn?.turnId === pendingTurnId &&
+        entry.latestTurn.requestedAt === requestedAt,
+    );
+    expect(thread.latestTurn?.requestedAt).toBe(requestedAt);
+  });
+
   it("accepts claude turn lifecycle when seeded thread id is a synthetic placeholder", async () => {
     const harness = await createHarness();
     const seededAt = "2026-01-01T00:00:00.000Z";

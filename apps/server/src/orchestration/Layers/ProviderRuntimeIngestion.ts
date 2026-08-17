@@ -1612,7 +1612,6 @@ const make = Effect.gen(function* () {
           case "turn.started":
             return !conflictsWithActiveTurn || conflictingTurnStartIsPendingTurnStart;
           case "turn.completed":
-          case "turn.aborted":
             if (conflictsWithActiveTurn || missingTurnForActiveTurn) {
               return false;
             }
@@ -1628,6 +1627,15 @@ const make = Effect.gen(function* () {
             // all — and applying it here stomps the "starting" lifecycle
             // state while a turn start is pending.
             return eventTurnId !== undefined;
+          case "turn.aborted":
+            // An abort cannot recover a missing turn.started: accepting a
+            // stale abort without an active turn would interrupt a newly
+            // starting session and discard its pending turn start.
+            return (
+              activeTurnId !== null &&
+              eventTurnId !== undefined &&
+              sameId(activeTurnId, eventTurnId)
+            );
           default:
             return true;
         }
