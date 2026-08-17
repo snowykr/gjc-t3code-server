@@ -1175,7 +1175,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               event.payload.interruptedTurnId !== undefined &&
               existingTurns.some(
                 (turn) =>
-                  turn.turnId === event.payload.interruptedTurnId && turn.state === "interrupted",
+                  turn.turnId === event.payload.interruptedTurnId &&
+                  (turn.state === "running" || turn.state === "interrupted"),
               );
             if (
               event.payload.session.status === "error" ||

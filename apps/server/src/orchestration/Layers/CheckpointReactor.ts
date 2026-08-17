@@ -452,6 +452,12 @@ const make = Effect.gen(function* () {
     readonly cwd: string;
     readonly turnCount: number;
     readonly checkpointRef?: CheckpointRef;
+    /**
+     * The terminal-abort reservation was persisted before the process
+     * restarted and its ref is already durable. Finalize the projection from
+     * that ref without overwriting it with the current worktree contents.
+     */
+    readonly checkpointAlreadyMaterialized?: boolean;
     readonly status: "ready" | "missing" | "error";
     readonly isTerminalAbort?: boolean;
     readonly assistantMessageId: MessageId | undefined;
@@ -474,10 +480,12 @@ const make = Effect.gen(function* () {
       });
     }
 
-    yield* checkpointStore.captureCheckpoint({
-      cwd: input.cwd,
-      checkpointRef: targetCheckpointRef,
-    });
+    if (!input.checkpointAlreadyMaterialized) {
+      yield* checkpointStore.captureCheckpoint({
+        cwd: input.cwd,
+        checkpointRef: targetCheckpointRef,
+      });
+    }
 
     // Refresh the workspace entry index so the @-mention file picker
     // reflects files created or deleted during this turn.
@@ -630,18 +638,6 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      // Only skip if a real (non-placeholder) checkpoint already exists for this turn.
-      // ProviderRuntimeIngestion may insert placeholder entries with status "missing"
-      // before this reactor runs; those must not prevent real git capture.
-      if (
-        event.type !== "turn.aborted" &&
-        thread.checkpoints.some(
-          (checkpoint) => checkpoint.turnId === turnId && checkpoint.status !== "missing",
-        )
-      ) {
-        return;
-      }
-
       const projects = yield* resolveThreadProjects(thread.projectId);
       const checkpointCwd = yield* resolveCheckpointCwd({
         threadId: thread.id,
@@ -650,6 +646,36 @@ const make = Effect.gen(function* () {
         preferSessionRuntime: true,
       });
       if (!checkpointCwd) {
+        // An accepted abort still settles the provider's abort gate even when
+        // the workspace cannot be checkpointed (missing CWD or non-Git CWD).
+        // Normal completion must keep its gate pending unless it has durable
+        // checkpoint evidence, handled below.
+        return event.type === "turn.aborted" ? true : undefined;
+      }
+
+      // ProviderRuntimeIngestion may insert placeholder checkpoints with
+      // status "missing" before this reactor runs; those must not prevent real
+      // git capture. A ready checkpoint can be reused only when its ref is
+      // still durable, which also settles a matching abort gate.
+      const existingCheckpoint = thread.checkpoints.find(
+        (checkpoint) => checkpoint.turnId === turnId,
+      );
+      if (
+        event.type !== "turn.aborted" &&
+        existingCheckpoint !== undefined &&
+        existingCheckpoint.status !== "missing"
+      ) {
+        if (existingCheckpoint.status !== "ready") {
+          return;
+        }
+        if (
+          yield* checkpointStore.hasCheckpointRef({
+            cwd: checkpointCwd,
+            checkpointRef: existingCheckpoint.checkpointRef,
+          })
+        ) {
+          return true;
+        }
         return;
       }
 
@@ -683,11 +709,19 @@ const make = Effect.gen(function* () {
             })
           : undefined;
 
+      // A persisted terminal reservation followed by a durable ref means the
+      // capture completed before the projection finalization was lost. Reuse
+      // that ref and finalize the projection; recapturing would overwrite the
+      // reserved terminal state with unrelated post-crash worktree edits.
+      const checkpointAlreadyMaterialized =
+        persistedTerminalAbortReservation !== undefined &&
+        (yield* checkpointStore.hasCheckpointRef({
+          cwd: checkpointCwd,
+          checkpointRef: persistedTerminalAbortReservation.checkpointRef,
+        }));
+
       // If a placeholder checkpoint exists for this turn, reuse its turn count
       // instead of incrementing past it.
-      const existingCheckpoint = thread.checkpoints.find(
-        (checkpoint) => checkpoint.turnId === turnId,
-      );
       const currentTurnCount = thread.checkpoints.reduce(
         (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
         0,
@@ -703,6 +737,7 @@ const make = Effect.gen(function* () {
         cwd: checkpointCwd,
         turnCount: terminalAbortReservation?.checkpointTurnCount ?? nextTurnCount,
         checkpointRef: terminalAbortReservation?.checkpointRef,
+        checkpointAlreadyMaterialized,
         status: checkpointStatusFromRuntime(
           event.type === "turn.aborted" ? "completed" : event.payload.state,
         ),

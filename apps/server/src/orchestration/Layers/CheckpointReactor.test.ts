@@ -683,6 +683,279 @@ describe("CheckpointReactor", () => {
     ).toHaveLength(1);
   });
 
+  it("settles an accepted abort gate when no checkpoint CWD is available", async () => {
+    const unavailableCwd = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-checkpoint-unavailable-cwd-"),
+    );
+    tempDirs.push(unavailableCwd);
+    const harness = await createHarness({
+      hasSession: false,
+      seedFilesystemCheckpoints: false,
+      threadWorktreePath: unavailableCwd,
+      projectWorkspaceRoot: unavailableCwd,
+    });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-aborted-without-cwd");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-abort-without-cwd"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await harness.registerAbortCheckpoint({ threadId, turnId });
+
+    harness.provider.emit({
+      type: "turn.aborted",
+      eventId: EventId.make("evt-turn-aborted-without-cwd"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId,
+      payload: { reason: "user requested interruption" },
+    });
+
+    await harness.drain();
+    expect(await harness.awaitAbortCheckpoint({ threadId, turnId })).toBe(true);
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.checkpoints).toEqual([]);
+    expect(
+      harness.receipts.some(
+        (receipt) => receipt.type === "checkpoint.diff.finalized" && receipt.turnId === turnId,
+      ),
+    ).toBe(false);
+  });
+
+  it("settles an accepted abort gate when the session CWD is not a Git repository", async () => {
+    const nonRepositorySessionCwd = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-checkpoint-abort-non-repo-"),
+    );
+    tempDirs.push(nonRepositorySessionCwd);
+    const harness = await createHarness({
+      seedFilesystemCheckpoints: false,
+      providerSessionCwd: nonRepositorySessionCwd,
+    });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-aborted-in-non-repo");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-abort-non-repo"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await harness.registerAbortCheckpoint({ threadId, turnId });
+
+    harness.provider.emit({
+      type: "turn.aborted",
+      eventId: EventId.make("evt-turn-aborted-non-repo"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId,
+      payload: { reason: "user requested interruption" },
+    });
+
+    await harness.drain();
+    expect(await harness.awaitAbortCheckpoint({ threadId, turnId })).toBe(true);
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.checkpoints).toEqual([]);
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 1))).toBe(false);
+  });
+
+  it("finalizes a materialized terminal-abort ref without recapture", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-aborted-materialized-reservation");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const checkpointRef = checkpointRefForThreadTurn(threadId, 1);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-interrupted-materialized-reservation"),
+        threadId,
+        session: {
+          threadId,
+          status: "interrupted",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-materialized-terminal-abort-reservation"),
+        threadId,
+        turnId,
+        completedAt: createdAt,
+        checkpointRef,
+        status: "missing",
+        files: [],
+        isTerminalAbort: true,
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+    await waitForThread(harness.readModel, (entry) =>
+      entry.checkpoints.some(
+        (checkpoint) =>
+          checkpoint.turnId === turnId &&
+          checkpoint.status === "missing" &&
+          checkpoint.checkpointTurnCount === 1,
+      ),
+    );
+
+    await runtime!.runPromise(
+      harness.checkpointStore.captureCheckpoint({
+        cwd: harness.cwd,
+        checkpointRef: checkpointRefForThreadTurn(threadId, 0),
+      }),
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(harness.cwd, "README.md"),
+      "reserved terminal state\n",
+      "utf8",
+    );
+    await runtime!.runPromise(
+      harness.checkpointStore.captureCheckpoint({
+        cwd: harness.cwd,
+        checkpointRef,
+      }),
+    );
+
+    // A post-crash edit must not replace the already-materialized reservation.
+    NodeFS.writeFileSync(
+      NodePath.join(harness.cwd, "README.md"),
+      "edited after recovery\n",
+      "utf8",
+    );
+    await harness.reconcileInterruptedTurn({ threadId, turnId });
+    await harness.drain();
+
+    expect(gitShowFileAtRef(harness.cwd, checkpointRef, "README.md")).toBe(
+      "reserved terminal state\n",
+    );
+    expect(
+      harness.receipts.filter(
+        (receipt) => receipt.type === "checkpoint.diff.finalized" && receipt.turnId === turnId,
+      ),
+    ).toHaveLength(1);
+    const terminalTurn = await runtime!.runPromise(
+      harness.projectionTurnRepository.getByTurnId({ threadId, turnId }),
+    );
+    expect(terminalTurn._tag).toBe("Some");
+    if (terminalTurn._tag === "Some") {
+      expect(terminalTurn.value.checkpointStatus).toBe("ready");
+      expect(terminalTurn.value.isTerminalAbortCheckpoint).toBe(true);
+    }
+  });
+
+  it("releases an abort gate when normal completion reuses a durable checkpoint", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-completed-with-reusable-checkpoint");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const checkpointRef = checkpointRefForThreadTurn(threadId, 1);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-reusable-checkpoint"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await runtime!.runPromise(
+      harness.checkpointStore.captureCheckpoint({
+        cwd: harness.cwd,
+        checkpointRef: checkpointRefForThreadTurn(threadId, 0),
+      }),
+    );
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "durable completion\n", "utf8");
+    await runtime!.runPromise(
+      harness.checkpointStore.captureCheckpoint({
+        cwd: harness.cwd,
+        checkpointRef,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-reusable-checkpoint-ready"),
+        threadId,
+        turnId,
+        completedAt: createdAt,
+        checkpointRef,
+        status: "ready",
+        files: [],
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+    await waitForThread(harness.readModel, (entry) => entry.checkpoints.length === 1);
+    await harness.registerAbortCheckpoint({ threadId, turnId });
+
+    NodeFS.writeFileSync(
+      NodePath.join(harness.cwd, "README.md"),
+      "later completion edit\n",
+      "utf8",
+    );
+    const waiting = runtime!.runPromise(
+      harness.awaitAbortCheckpointEffect({ threadId, turnId }).pipe(Effect.timeout("100 millis")),
+    );
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-reusable-checkpoint"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId,
+      payload: { state: "completed" },
+    });
+
+    expect(await waiting).toBe(true);
+    expect(gitShowFileAtRef(harness.cwd, checkpointRef, "README.md")).toBe("durable completion\n");
+  });
+
   it("retains a consumable completion sentinel when abort capture precedes gate registration", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const threadId = ThreadId.make("thread-1");

@@ -2898,22 +2898,6 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
           },
         });
         yield* appendAndProject({
-          type: "thread.turn-interrupt-requested",
-          eventId: EventId.make("evt-interrupted-current-turn"),
-          aggregateKind: "thread",
-          aggregateId: currentThreadId,
-          occurredAt: "2026-02-26T14:20:02.000Z",
-          commandId: CommandId.make("cmd-interrupted-current-turn"),
-          causationEventId: null,
-          correlationId: CommandId.make("cmd-interrupted-current-turn"),
-          metadata: {},
-          payload: {
-            threadId: currentThreadId,
-            turnId: currentTurnId,
-            createdAt: "2026-02-26T14:20:02.000Z",
-          },
-        });
-        yield* appendAndProject({
           type: "thread.session-set",
           eventId: EventId.make("evt-interrupted-current-session"),
           aggregateKind: "thread",
@@ -2933,6 +2917,30 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
               activeTurnId: null,
               lastError: null,
               updatedAt: "2026-02-26T14:20:03.000Z",
+            },
+            interruptedTurnId: currentTurnId,
+          },
+        });
+        yield* appendAndProject({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-interrupted-current-session-repeat"),
+          aggregateKind: "thread",
+          aggregateId: currentThreadId,
+          occurredAt: "2026-02-26T14:20:04.000Z",
+          commandId: CommandId.make("cmd-interrupted-current-session-repeat"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupted-current-session-repeat"),
+          metadata: {},
+          payload: {
+            threadId: currentThreadId,
+            session: {
+              threadId: currentThreadId,
+              status: "interrupted",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: "2026-02-26T14:20:04.000Z",
             },
             interruptedTurnId: currentTurnId,
           },
