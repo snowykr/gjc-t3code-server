@@ -439,7 +439,7 @@ const make = Effect.gen(function* () {
         cwd: checkpointCwd,
         turnCount: nextTurnCount,
         status: checkpointStatusFromRuntime(
-          event.type === "turn.aborted" ? "interrupted" : event.payload.state,
+          event.type === "turn.aborted" ? "completed" : event.payload.state,
         ),
         assistantMessageId: undefined,
         createdAt: event.createdAt,

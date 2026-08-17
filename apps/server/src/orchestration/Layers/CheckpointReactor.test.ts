@@ -564,7 +564,7 @@ describe("CheckpointReactor", () => {
     ).toBe("v2\n");
   });
 
-  it("captures a missing checkpoint when a turn aborts without a completion event", async () => {
+  it("captures a ready checkpoint when a turn aborts without a completion event", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const threadId = ThreadId.make("thread-1");
     const turnId = asTurnId("turn-aborted-checkpoint");
@@ -630,7 +630,7 @@ describe("CheckpointReactor", () => {
       (receipt) =>
         receipt.type === "checkpoint.diff.finalized" &&
         receipt.turnId === turnId &&
-        receipt.status === "missing",
+        receipt.status === "ready",
     );
     await waitForReceipt(
       harness.receipts,
@@ -643,7 +643,7 @@ describe("CheckpointReactor", () => {
       entry.checkpoints.some(
         (checkpoint) =>
           checkpoint.turnId === turnId &&
-          checkpoint.status === "missing" &&
+          checkpoint.status === "ready" &&
           checkpoint.checkpointTurnCount === 1,
       ),
     );
