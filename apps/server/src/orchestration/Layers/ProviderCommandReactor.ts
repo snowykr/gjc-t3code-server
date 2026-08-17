@@ -1112,12 +1112,13 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    let observedActiveAbortCheckpoint = false;
     if (thread.session?.status === "running" && thread.session.activeTurnId !== null) {
-      const observedAbortCheckpoint = yield* checkpointReactor.awaitAbortCheckpoint({
+      observedActiveAbortCheckpoint = yield* checkpointReactor.awaitAbortCheckpoint({
         threadId: event.payload.threadId,
         turnId: thread.session.activeTurnId,
       });
-      if (observedAbortCheckpoint) {
+      if (observedActiveAbortCheckpoint) {
         // The terminal event is already in flight. Continue to the normal
         // checkpoint/start gate below instead of dropping this queued turn.
       } else {
@@ -1210,10 +1211,13 @@ const make = Effect.gen(function* () {
         turn.state === "interrupted",
     );
     if (interruptedTurn?.turnId !== null && interruptedTurn?.turnId !== undefined) {
-      const observedAbortCheckpoint = yield* checkpointReactor.awaitAbortCheckpoint({
-        threadId: event.payload.threadId,
-        turnId: interruptedTurn.turnId,
-      });
+      const observedAbortCheckpoint =
+        observedActiveAbortCheckpoint && thread.session?.activeTurnId === interruptedTurn.turnId
+          ? true
+          : yield* checkpointReactor.awaitAbortCheckpoint({
+              threadId: event.payload.threadId,
+              turnId: interruptedTurn.turnId,
+            });
       if (!observedAbortCheckpoint) {
         yield* checkpointReactor
           .reconcileInterruptedTurn({
