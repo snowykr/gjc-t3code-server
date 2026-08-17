@@ -1021,6 +1021,9 @@ const ThreadTurnDiffCompleteCommand = Schema.Struct({
   status: OrchestrationCheckpointStatus,
   files: Schema.Array(OrchestrationCheckpointFile),
   assistantMessageId: Schema.optional(MessageId),
+  // `true` is also used by the pre-capture terminal-abort reservation. A
+  // reservation is represented by `status: "missing"`; only its subsequent
+  // `status: "ready"` event is terminal-capture completion evidence.
   isTerminalAbort: Schema.optional(Schema.Boolean),
   checkpointTurnCount: NonNegativeInt,
   createdAt: IsoDateTime,
@@ -1335,6 +1338,9 @@ export const ThreadTurnDiffCompletedPayload = Schema.Struct({
   status: OrchestrationCheckpointStatus,
   files: Schema.Array(OrchestrationCheckpointFile),
   assistantMessageId: Schema.NullOr(MessageId),
+  // A missing terminal-abort event is a durable capture reservation. It must
+  // not be confused with a provider's mid-turn placeholder, which leaves this
+  // marker false.
   isTerminalAbort: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   completedAt: IsoDateTime,
 });

@@ -1390,6 +1390,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           status: command.status,
           files: command.files,
           assistantMessageId: command.assistantMessageId ?? null,
+          // Preserve both terminal-abort reservations (`missing`) and their
+          // final captures (`ready`) in the durable event payload.
           isTerminalAbort: command.isTerminalAbort ?? false,
           completedAt: command.completedAt,
         },

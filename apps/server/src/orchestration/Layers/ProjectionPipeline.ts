@@ -1419,6 +1419,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         case "thread.turn-diff-completed": {
           // Mid-turn diff updates produce placeholder checkpoints; record the
           // checkpoint, but don't settle a turn its session is still running.
+          // Terminal-abort reservations intentionally use the same event with
+          // `status: "missing"` and `isTerminalAbort: true`; that marker is
+          // durable intent, not proof that Git capture has completed.
           const session = yield* projectionThreadSessionRepository.getByThreadId({
             threadId: event.payload.threadId,
           });

@@ -918,7 +918,7 @@ describe("CheckpointReactor", () => {
     ).toHaveLength(1);
   });
 
-  it("treats an existing hidden checkpoint ref as crash-window completion during reconciliation", async () => {
+  it("does not treat an existing hidden checkpoint ref as terminal completion during reconciliation", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const threadId = ThreadId.make("thread-1");
     const turnId = asTurnId("turn-aborted-crash-window");
@@ -983,19 +983,95 @@ describe("CheckpointReactor", () => {
     await harness.drain();
 
     expect(gitShowFileAtRef(harness.cwd, checkpointRef, "README.md")).toBe(
-      "aborted before crash\n",
+      "edited after restart\n",
     );
     expect(
       harness.receipts.filter(
         (receipt) => receipt.type === "checkpoint.diff.finalized" && receipt.turnId === turnId,
       ),
-    ).toHaveLength(0);
-    const interruptedTurn = await runtime!.runPromise(
+    ).toHaveLength(1);
+    const terminalTurn = await runtime!.runPromise(
       harness.projectionTurnRepository.getByTurnId({ threadId, turnId }),
     );
-    expect(interruptedTurn._tag).toBe("Some");
-    if (interruptedTurn._tag === "Some") {
-      expect(interruptedTurn.value.isTerminalAbortCheckpoint).toBe(false);
+    expect(terminalTurn._tag).toBe("Some");
+    if (terminalTurn._tag === "Some") {
+      expect(terminalTurn.value.isTerminalAbortCheckpoint).toBe(true);
+    }
+  });
+
+  it("reuses a persisted terminal-abort reservation after a crash", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-aborted-reserved-crash");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const checkpointRef = checkpointRefForThreadTurn(threadId, 1);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-interrupted-reserved-crash"),
+        threadId,
+        session: {
+          threadId,
+          status: "interrupted",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-terminal-abort-reservation"),
+        threadId,
+        turnId,
+        completedAt: createdAt,
+        checkpointRef,
+        status: "missing",
+        files: [],
+        isTerminalAbort: true,
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+
+    await waitForThread(harness.readModel, (entry) =>
+      entry.checkpoints.some(
+        (checkpoint) =>
+          checkpoint.turnId === turnId &&
+          checkpoint.status === "missing" &&
+          checkpoint.checkpointTurnCount === 1,
+      ),
+    );
+    await runtime!.runPromise(
+      harness.checkpointStore.captureCheckpoint({
+        cwd: harness.cwd,
+        checkpointRef: checkpointRefForThreadTurn(threadId, 0),
+      }),
+    );
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "reserved abort work\n", "utf8");
+
+    await harness.reconcileInterruptedTurn({ threadId, turnId });
+    await harness.drain();
+
+    expect(gitShowFileAtRef(harness.cwd, checkpointRef, "README.md")).toBe("reserved abort work\n");
+    expect(
+      harness.receipts.filter(
+        (receipt) => receipt.type === "checkpoint.diff.finalized" && receipt.turnId === turnId,
+      ),
+    ).toHaveLength(1);
+    const terminalTurn = await runtime!.runPromise(
+      harness.projectionTurnRepository.getByTurnId({ threadId, turnId }),
+    );
+    expect(terminalTurn._tag).toBe("Some");
+    if (terminalTurn._tag === "Some") {
+      expect(terminalTurn.value.checkpointTurnCount).toBe(1);
+      expect(terminalTurn.value.checkpointRef).toBe(checkpointRef);
+      expect(terminalTurn.value.isTerminalAbortCheckpoint).toBe(true);
     }
   });
 
