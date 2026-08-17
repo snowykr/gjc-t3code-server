@@ -51,6 +51,11 @@ type ReactorInput =
       readonly event: OrchestrationEvent;
     };
 
+type ProviderTurnTerminalEvent = Extract<
+  ProviderRuntimeEvent,
+  { type: "turn.completed" | "turn.aborted" }
+>;
+
 function toTurnId(value: string | undefined): TurnId | null {
   return value === undefined ? null : TurnId.make(String(value));
 }
@@ -351,9 +356,9 @@ const make = Effect.gen(function* () {
     });
   });
 
-  // Captures a real git checkpoint when a turn completes via a runtime event.
-  const captureCheckpointFromTurnCompletion = Effect.fn("captureCheckpointFromTurnCompletion")(
-    function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>) {
+  // Captures a real git checkpoint when a provider reports a terminal turn event.
+  const captureCheckpointFromTurnTerminal = Effect.fn("captureCheckpointFromTurnTerminal")(
+    function* (event: ProviderTurnTerminalEvent) {
       const turnId = toTurnId(event.turnId);
       if (!turnId) {
         return;
@@ -410,7 +415,9 @@ const make = Effect.gen(function* () {
         thread,
         cwd: checkpointCwd,
         turnCount: nextTurnCount,
-        status: checkpointStatusFromRuntime(event.payload.state),
+        status: checkpointStatusFromRuntime(
+          event.type === "turn.aborted" ? "interrupted" : event.payload.state,
+        ),
         assistantMessageId: undefined,
         createdAt: event.createdAt,
       });
@@ -529,32 +536,32 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const refreshLocalGitStatusFromTurnCompletion = Effect.fn(
-    "refreshLocalGitStatusFromTurnCompletion",
-  )(function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>) {
-    const sessionRuntime = yield* resolveSessionRuntimeForThread(event.threadId);
-    if (Option.isNone(sessionRuntime)) {
-      return;
-    }
+  const refreshLocalGitStatusFromTurnTerminal = Effect.fn("refreshLocalGitStatusFromTurnTerminal")(
+    function* (event: ProviderTurnTerminalEvent) {
+      const sessionRuntime = yield* resolveSessionRuntimeForThread(event.threadId);
+      if (Option.isNone(sessionRuntime)) {
+        return;
+      }
 
-    const local = yield* vcsStatusBroadcaster.refreshLocalStatus(sessionRuntime.value.cwd).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("failed to refresh local git status after turn completion", {
+      const local = yield* vcsStatusBroadcaster.refreshLocalStatus(sessionRuntime.value.cwd).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to refresh local git status after turn completion", {
+            threadId: event.threadId,
+            turnId: event.turnId ?? null,
+            cwd: sessionRuntime.value.cwd,
+            detail: error.message,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+      if (local !== null) {
+        yield* followWorktreeBranchDrift({
           threadId: event.threadId,
-          turnId: event.turnId ?? null,
           cwd: sessionRuntime.value.cwd,
-          detail: error.message,
-        }).pipe(Effect.as(null)),
-      ),
-    );
-    if (local !== null) {
-      yield* followWorktreeBranchDrift({
-        threadId: event.threadId,
-        cwd: sessionRuntime.value.cwd,
-        local,
-      });
-    }
-  });
+          local,
+        });
+      }
+    },
+  );
 
   // A `git checkout` run inside a thread's dedicated worktree (by an agent or
   // the user) bypasses T3's commands, so the thread's recorded branch goes
@@ -868,10 +875,10 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    if (event.type === "turn.completed") {
+    if (event.type === "turn.completed" || event.type === "turn.aborted") {
       const turnId = toTurnId(event.turnId);
-      yield* refreshLocalGitStatusFromTurnCompletion(event);
-      yield* captureCheckpointFromTurnCompletion(event).pipe(
+      yield* refreshLocalGitStatusFromTurnTerminal(event);
+      yield* captureCheckpointFromTurnTerminal(event).pipe(
         Effect.catch((error) =>
           Effect.flatMap(nowIso, (createdAt) =>
             appendCaptureFailureActivity({
@@ -929,7 +936,11 @@ const make = Effect.gen(function* () {
 
     yield* forkParked(
       Stream.runForEach(providerService.streamEvents, (event) => {
-        if (event.type !== "turn.started" && event.type !== "turn.completed") {
+        if (
+          event.type !== "turn.started" &&
+          event.type !== "turn.completed" &&
+          event.type !== "turn.aborted"
+        ) {
           return Effect.void;
         }
         return worker.enqueue({ source: "runtime", event });

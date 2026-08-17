@@ -529,6 +529,48 @@ describe("CheckpointReactor", () => {
     ).toBe("v2\n");
   });
 
+  it("captures a missing checkpoint when a turn aborts without a completion event", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-aborted-checkpoint");
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-aborted-checkpoint"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId,
+    });
+    await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0));
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "aborted work\n", "utf8");
+    harness.provider.emit({
+      type: "turn.aborted",
+      eventId: EventId.make("evt-turn-aborted-checkpoint"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId,
+      turnId,
+      payload: { reason: "user requested interruption" },
+    });
+
+    await waitForEvent(harness.engine, (event) => event.type === "thread.turn-diff-completed");
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.checkpoints.some(
+        (checkpoint) =>
+          checkpoint.turnId === turnId &&
+          checkpoint.status === "missing" &&
+          checkpoint.checkpointTurnCount === 1,
+      ),
+    );
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 1))).toBe(true);
+    expect(
+      gitShowFileAtRef(harness.cwd, checkpointRefForThreadTurn(threadId, 1), "README.md"),
+    ).toBe("aborted work\n");
+    expect(thread.checkpoints).toHaveLength(1);
+  });
+
   it("refreshes local git status state on turn completion using the session cwd", async () => {
     const gitStatusRefreshCalls: string[] = [];
     const harness = await createHarness({
