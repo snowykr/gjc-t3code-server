@@ -35,7 +35,7 @@ export interface CheckpointReactorShape {
   readonly awaitAbortCheckpoint: (input: {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
-  }) => Effect.Effect<void>;
+  }) => Effect.Effect<boolean>;
 
   readonly registerAbortCheckpoint: (input: {
     readonly threadId: ThreadId;

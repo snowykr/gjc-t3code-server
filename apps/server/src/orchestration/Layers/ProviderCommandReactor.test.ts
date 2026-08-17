@@ -410,7 +410,7 @@ describe("ProviderCommandReactor", () => {
         Layer.succeed(CheckpointReactor, {
           start: () => Effect.void,
           drain: Effect.void,
-          awaitAbortCheckpoint: () => Effect.void,
+          awaitAbortCheckpoint: () => Effect.succeed(false),
           registerAbortCheckpoint: () => Effect.void,
           reconcileInterruptedTurn: () => Effect.void,
         }),

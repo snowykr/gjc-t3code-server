@@ -142,13 +142,17 @@ const make = Effect.gen(function* () {
     Ref.modify(abortCheckpointDeferreds, (current) => {
       const key = abortCheckpointKey(input.threadId, input.turnId);
       const deferred = current.get(key);
-      if (deferred !== "completed") return [deferred, current] as const;
+      if (deferred === undefined)
+        return [{ deferred: undefined, observed: false }, current] as const;
+      if (deferred !== "completed") return [{ deferred, observed: true }, current] as const;
       const next = new Map(current);
       next.delete(key);
-      return [undefined, next] as const;
+      return [{ deferred: undefined, observed: true }, next] as const;
     }).pipe(
-      Effect.flatMap((deferred) => {
-        return deferred === undefined ? Effect.void : Deferred.await(deferred);
+      Effect.flatMap(({ deferred, observed }) => {
+        return deferred === undefined
+          ? Effect.succeed(observed)
+          : Deferred.await(deferred).pipe(Effect.as(true));
       }),
     );
   const reconcileInterruptedTurn = Effect.fn("reconcileInterruptedTurn")(function* (input: {

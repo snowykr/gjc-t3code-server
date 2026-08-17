@@ -1190,14 +1190,24 @@ const make = Effect.gen(function* () {
         turn.state === "interrupted",
     );
     if (interruptedTurn?.turnId !== null && interruptedTurn?.turnId !== undefined) {
-      yield* checkpointReactor.reconcileInterruptedTurn({
+      const observedAbortCheckpoint = yield* checkpointReactor.awaitAbortCheckpoint({
         threadId: event.payload.threadId,
         turnId: interruptedTurn.turnId,
       });
-      yield* checkpointReactor.awaitAbortCheckpoint({
-        threadId: event.payload.threadId,
-        turnId: interruptedTurn.turnId,
-      });
+      if (
+        !observedAbortCheckpoint &&
+        (interruptedTurn.checkpointRef === null ||
+          String(interruptedTurn.checkpointRef).startsWith("provider-diff:"))
+      ) {
+        yield* checkpointReactor.reconcileInterruptedTurn({
+          threadId: event.payload.threadId,
+          turnId: interruptedTurn.turnId,
+        });
+        yield* checkpointReactor.awaitAbortCheckpoint({
+          threadId: event.payload.threadId,
+          turnId: interruptedTurn.turnId,
+        });
+      }
     }
 
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
