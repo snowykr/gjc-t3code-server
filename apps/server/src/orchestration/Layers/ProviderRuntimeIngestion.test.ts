@@ -793,6 +793,108 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.latestTurn?.state).toBe("interrupted");
   });
 
+  it("places interruptedTurnId on accepted abort session-set commands and retains queued turn linkage", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnA = asTurnId("turn-a");
+    const turnB = asTurnId("turn-b");
+    const messageB = asMessageId("message-b");
+    const queuedAt = "2026-01-01T00:00:01.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-a-for-abort-linkage"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId: turnA,
+      payload: {},
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnA,
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-b-for-abort-linkage"),
+      threadId,
+      message: {
+        messageId: messageB,
+        role: "user",
+        text: "queued turn B",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: queuedAt,
+    });
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-a-for-abort-linkage"),
+      threadId,
+      turnId: turnA,
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.latestTurn?.turnId === turnA && thread.latestTurn.state === "interrupted",
+    );
+
+    harness.emit({
+      type: "turn.aborted",
+      eventId: asEventId("evt-turn-aborted-a-for-abort-linkage"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId: turnA,
+      payload: { reason: "user requested interruption" },
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "interrupted" && thread.session.activeTurnId === null,
+    );
+
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const sessionSetEvents = events.filter(
+      (event): event is Extract<(typeof events)[number], { type: "thread.session-set" }> =>
+        event.type === "thread.session-set",
+    );
+    const interruptedSessionSet = sessionSetEvents.find(
+      (event) => event.payload.session.status === "interrupted",
+    );
+    expect(interruptedSessionSet?.payload.interruptedTurnId).toBe(turnA);
+    expect(interruptedSessionSet?.payload.session).not.toHaveProperty("interruptedTurnId");
+    expect(
+      sessionSetEvents
+        .filter((event) => event !== interruptedSessionSet)
+        .every((event) => event.payload.interruptedTurnId === undefined),
+    ).toBe(true);
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-b-for-abort-linkage"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:04.000Z",
+      threadId,
+      turnId: turnB,
+      payload: {},
+    });
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "running" &&
+        entry.session.activeTurnId === turnB &&
+        entry.latestTurn?.turnId === turnB &&
+        entry.latestTurn.requestedAt === queuedAt,
+    );
+    expect(thread.latestTurn?.requestedAt).toBe(queuedAt);
+  });
+
   it("ignores a mismatched turn.aborted for a different active turn", async () => {
     const harness = await createHarness();
     const threadId = asThreadId("thread-1");

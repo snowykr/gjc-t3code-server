@@ -1777,15 +1777,15 @@ const make = Effect.gen(function* () {
                 : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
               activeTurnId: nextActiveTurnId,
-              ...(event.type === "turn.aborted" &&
-              shouldApplyThreadLifecycle &&
-              eventTurnId !== undefined
-                ? { interruptedTurnId: eventTurnId }
-                : {}),
               ...(adapterCapabilities !== undefined ? { adapterCapabilities } : {}),
               lastError,
               updatedAt: now,
             },
+            ...(event.type === "turn.aborted" &&
+            shouldApplyThreadLifecycle &&
+            eventTurnId !== undefined
+              ? { interruptedTurnId: eventTurnId }
+              : {}),
             createdAt: now,
           });
         }
