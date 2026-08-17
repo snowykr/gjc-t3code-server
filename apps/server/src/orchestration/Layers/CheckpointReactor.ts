@@ -156,7 +156,11 @@ const make = Effect.gen(function* () {
     readonly turnId: TurnId;
   }) {
     const thread = yield* resolveThreadDetail(input.threadId);
-    if (!thread || thread.checkpoints.some((checkpoint) => checkpoint.turnId === input.turnId)) {
+    if (
+      !thread ||
+      thread.session?.status !== "interrupted" ||
+      thread.checkpoints.some((checkpoint) => checkpoint.turnId === input.turnId)
+    ) {
       return;
     }
     yield* registerAbortCheckpoint(input);
