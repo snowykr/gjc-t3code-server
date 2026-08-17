@@ -47,6 +47,7 @@ export const ProjectionTurn = Schema.Struct({
   checkpointTurnCount: Schema.NullOr(NonNegativeInt),
   checkpointRef: Schema.NullOr(CheckpointRef),
   checkpointStatus: Schema.NullOr(OrchestrationCheckpointStatus),
+  isTerminalAbortCheckpoint: Schema.Boolean,
   checkpointFiles: Schema.Array(OrchestrationCheckpointFile),
 });
 export type ProjectionTurn = typeof ProjectionTurn.Type;
@@ -65,6 +66,7 @@ export const ProjectionTurnById = Schema.Struct({
   checkpointTurnCount: Schema.NullOr(NonNegativeInt),
   checkpointRef: Schema.NullOr(CheckpointRef),
   checkpointStatus: Schema.NullOr(OrchestrationCheckpointStatus),
+  isTerminalAbortCheckpoint: Schema.Boolean,
   checkpointFiles: Schema.Array(OrchestrationCheckpointFile),
 });
 export type ProjectionTurnById = typeof ProjectionTurnById.Type;

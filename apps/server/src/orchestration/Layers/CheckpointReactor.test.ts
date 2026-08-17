@@ -44,7 +44,9 @@ import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import { RuntimeReceiptBusTest } from "./RuntimeReceiptBus.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
+import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
@@ -274,6 +276,7 @@ describe("CheckpointReactor", () => {
     | CheckpointReactor
     | CheckpointStore.CheckpointStore
     | ProjectionSnapshotQuery
+    | ProjectionTurnRepository
     | RuntimeReceiptBus,
     unknown
   > | null = null;
@@ -358,6 +361,7 @@ describe("CheckpointReactor", () => {
     });
 
     const layer = CheckpointReactorLive.pipe(
+      Layer.provideMerge(ProjectionTurnRepositoryLive),
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(RuntimeReceiptBusTest),
@@ -383,6 +387,9 @@ describe("CheckpointReactor", () => {
     const receiptBus = await runtime.runPromise(Effect.service(RuntimeReceiptBus));
     const checkpointStore = await runtime.runPromise(
       Effect.service(CheckpointStore.CheckpointStore),
+    );
+    const projectionTurnRepository = await runtime.runPromise(
+      Effect.service(ProjectionTurnRepository),
     );
     scope = await Effect.runPromise(Scope.make("sequential"));
     const receipts: OrchestrationRuntimeReceipt[] = [];
@@ -482,6 +489,7 @@ describe("CheckpointReactor", () => {
       provider,
       cwd,
       checkpointStore,
+      projectionTurnRepository,
       drain,
       receipts,
       registerAbortCheckpoint: (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
@@ -765,29 +773,22 @@ describe("CheckpointReactor", () => {
         receipt.turnId === turnId &&
         receipt.status === "ready",
     );
-    const thread = await waitForThread(harness.readModel, (entry) =>
-      entry.activities.some(
-        (activity) =>
-          activity.kind === "checkpoint.captured" &&
-          activity.turnId === turnId &&
-          typeof activity.payload === "object" &&
-          activity.payload !== null &&
-          !Array.isArray(activity.payload) &&
-          (activity.payload as { readonly isTerminalAbort?: unknown }).isTerminalAbort === true,
-      ),
-    );
+    await waitForThread(harness.readModel, (entry) => entry.checkpoints.length === 1);
     await harness.drain();
     expect(
       gitShowFileAtRef(harness.cwd, checkpointRefForThreadTurn(threadId, 1), "README.md"),
     ).toBe("later abort edit\n");
 
-    const captureActivity = thread.activities
-      .toReversed()
-      .find((activity) => activity.kind === "checkpoint.captured" && activity.turnId === turnId);
-    expect(
-      (captureActivity?.payload as { readonly isTerminalAbort?: unknown } | undefined)
-        ?.isTerminalAbort,
-    ).toBe(true);
+    const terminalTurn = await runtime!.runPromise(
+      harness.projectionTurnRepository.getByTurnId({
+        threadId,
+        turnId,
+      }),
+    );
+    expect(terminalTurn._tag).toBe("Some");
+    if (terminalTurn._tag === "Some") {
+      expect(terminalTurn.value.isTerminalAbortCheckpoint).toBe(true);
+    }
   });
 
   it("does not checkpoint a stale abort without a matching active or interrupted turn", async () => {
@@ -887,15 +888,16 @@ describe("CheckpointReactor", () => {
           checkpoint.checkpointTurnCount === 1,
       ),
     );
-    const finalizedSnapshot = await harness.readModel();
-    const finalizedThread = finalizedSnapshot.threads.find((entry) => entry.id === threadId);
-    const captureActivity = finalizedThread?.activities.find(
-      (activity) => activity.kind === "checkpoint.captured" && activity.turnId === turnId,
+    const terminalTurn = await runtime!.runPromise(
+      harness.projectionTurnRepository.getByTurnId({
+        threadId,
+        turnId,
+      }),
     );
-    expect(
-      (captureActivity?.payload as { readonly isTerminalAbort?: unknown } | undefined)
-        ?.isTerminalAbort,
-    ).toBe(true);
+    expect(terminalTurn._tag).toBe("Some");
+    if (terminalTurn._tag === "Some") {
+      expect(terminalTurn.value.isTerminalAbortCheckpoint).toBe(true);
+    }
     await harness.drain();
     expect(await harness.awaitAbortCheckpoint({ threadId, turnId })).toBe(true);
     expect(await harness.awaitAbortCheckpoint({ threadId, turnId })).toBe(false);

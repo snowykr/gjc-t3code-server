@@ -1020,6 +1020,7 @@ const ThreadTurnDiffCompleteCommand = Schema.Struct({
   status: OrchestrationCheckpointStatus,
   files: Schema.Array(OrchestrationCheckpointFile),
   assistantMessageId: Schema.optional(MessageId),
+  isTerminalAbort: Schema.optional(Schema.Boolean),
   checkpointTurnCount: NonNegativeInt,
   createdAt: IsoDateTime,
 });
@@ -1332,6 +1333,7 @@ export const ThreadTurnDiffCompletedPayload = Schema.Struct({
   status: OrchestrationCheckpointStatus,
   files: Schema.Array(OrchestrationCheckpointFile),
   assistantMessageId: Schema.NullOr(MessageId),
+  isTerminalAbort: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   completedAt: IsoDateTime,
 });
 

@@ -1304,6 +1304,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               checkpointTurnCount: null,
               checkpointRef: null,
               checkpointStatus: null,
+              isTerminalAbortCheckpoint: false,
               checkpointFiles: [],
             });
           }
@@ -1368,6 +1369,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             checkpointTurnCount: null,
             checkpointRef: null,
             checkpointStatus: null,
+            isTerminalAbortCheckpoint: false,
             checkpointFiles: [],
           });
           return;
@@ -1405,6 +1407,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             checkpointTurnCount: null,
             checkpointRef: null,
             checkpointStatus: null,
+            isTerminalAbortCheckpoint: false,
             checkpointFiles: [],
           });
           return;
@@ -1450,6 +1453,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               checkpointTurnCount: event.payload.checkpointTurnCount,
               checkpointRef: event.payload.checkpointRef,
               checkpointStatus: event.payload.status,
+              isTerminalAbortCheckpoint:
+                existingTurn.value.isTerminalAbortCheckpoint || event.payload.isTerminalAbort,
               checkpointFiles: event.payload.files,
               startedAt: existingTurn.value.startedAt ?? event.payload.completedAt,
               requestedAt: existingTurn.value.requestedAt ?? event.payload.completedAt,
@@ -1471,6 +1476,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             checkpointTurnCount: event.payload.checkpointTurnCount,
             checkpointRef: event.payload.checkpointRef,
             checkpointStatus: event.payload.status,
+            isTerminalAbortCheckpoint: event.payload.isTerminalAbort,
             checkpointFiles: event.payload.files,
           });
           return;

@@ -1387,6 +1387,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           status: command.status,
           files: command.files,
           assistantMessageId: command.assistantMessageId ?? null,
+          isTerminalAbort: command.isTerminalAbort ?? false,
           completedAt: command.completedAt,
         },
       };

@@ -23,15 +23,40 @@ import {
 
 const ProjectionTurnDbRowSchema = ProjectionTurn.mapFields(
   Struct.assign({
+    isTerminalAbortCheckpoint: Schema.Number,
     checkpointFiles: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
   }),
 );
 
 const ProjectionTurnByIdDbRowSchema = ProjectionTurnById.mapFields(
   Struct.assign({
+    isTerminalAbortCheckpoint: Schema.Number,
     checkpointFiles: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
   }),
 );
+
+const ProjectionTurnByIdRequestSchema = ProjectionTurnById.mapFields(
+  Struct.assign({
+    checkpointFiles: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
+  }),
+);
+
+type ProjectionTurnDbRow = Schema.Schema.Type<typeof ProjectionTurnDbRowSchema>;
+type ProjectionTurnByIdDbRow = Schema.Schema.Type<typeof ProjectionTurnByIdDbRowSchema>;
+
+function toProjectionTurn(row: ProjectionTurnDbRow): ProjectionTurn {
+  return {
+    ...row,
+    isTerminalAbortCheckpoint: row.isTerminalAbortCheckpoint !== 0,
+  };
+}
+
+function toProjectionTurnById(row: ProjectionTurnByIdDbRow): ProjectionTurnById {
+  return {
+    ...row,
+    isTerminalAbortCheckpoint: row.isTerminalAbortCheckpoint !== 0,
+  };
+}
 
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
   return (cause: unknown) =>
@@ -44,7 +69,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   const upsertProjectionTurnById = SqlSchema.void({
-    Request: ProjectionTurnByIdDbRowSchema,
+    Request: ProjectionTurnByIdRequestSchema,
     execute: (row) =>
       sql`
         INSERT INTO projection_turns (
@@ -61,6 +86,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           checkpoint_turn_count,
           checkpoint_ref,
           checkpoint_status,
+          is_terminal_abort_checkpoint,
           checkpoint_files_json
         )
         VALUES (
@@ -77,6 +103,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           ${row.checkpointTurnCount},
           ${row.checkpointRef},
           ${row.checkpointStatus},
+          ${row.isTerminalAbortCheckpoint ? 1 : 0},
           ${row.checkpointFiles}
         )
         ON CONFLICT (thread_id, turn_id)
@@ -92,6 +119,10 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           checkpoint_turn_count = excluded.checkpoint_turn_count,
           checkpoint_ref = excluded.checkpoint_ref,
           checkpoint_status = excluded.checkpoint_status,
+          is_terminal_abort_checkpoint = MAX(
+            projection_turns.is_terminal_abort_checkpoint,
+            excluded.is_terminal_abort_checkpoint
+          ),
           checkpoint_files_json = excluded.checkpoint_files_json
       `,
   });
@@ -126,6 +157,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           checkpoint_turn_count,
           checkpoint_ref,
           checkpoint_status,
+          is_terminal_abort_checkpoint,
           checkpoint_files_json
         )
         VALUES (
@@ -142,6 +174,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           NULL,
           NULL,
           NULL,
+          0,
           '[]'
         )
       `,
@@ -188,6 +221,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           checkpoint_turn_count AS "checkpointTurnCount",
           checkpoint_ref AS "checkpointRef",
           checkpoint_status AS "checkpointStatus",
+          is_terminal_abort_checkpoint AS "isTerminalAbortCheckpoint",
           checkpoint_files_json AS "checkpointFiles"
         FROM projection_turns
         WHERE thread_id = ${threadId}
@@ -221,6 +255,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           checkpoint_turn_count AS "checkpointTurnCount",
           checkpoint_ref AS "checkpointRef",
           checkpoint_status AS "checkpointStatus",
+          is_terminal_abort_checkpoint AS "isTerminalAbortCheckpoint",
           checkpoint_files_json AS "checkpointFiles"
         FROM projection_turns
         WHERE thread_id = ${threadId}
@@ -238,6 +273,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           checkpoint_turn_count = NULL,
           checkpoint_ref = NULL,
           checkpoint_status = NULL,
+          is_terminal_abort_checkpoint = 0,
           checkpoint_files_json = '[]'
         WHERE thread_id = ${threadId}
           AND checkpoint_turn_count = ${checkpointTurnCount}
@@ -304,7 +340,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           "ProjectionTurnRepository.listByThreadId:decodeRows",
         ),
       ),
-      Effect.map((rows) => rows as ReadonlyArray<Schema.Schema.Type<typeof ProjectionTurn>>),
+      Effect.map((rows) => rows.map(toProjectionTurn)),
     );
 
   const getByTurnId: ProjectionTurnRepositoryShape["getByTurnId"] = (input) =>
@@ -318,8 +354,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
       Effect.flatMap((rowOption) =>
         Option.match(rowOption, {
           onNone: () => Effect.succeed(Option.none()),
-          onSome: (row) =>
-            Effect.succeed(Option.some(row as Schema.Schema.Type<typeof ProjectionTurnById>)),
+          onSome: (row) => Effect.succeed(Option.some(toProjectionTurnById(row))),
         }),
       ),
     );

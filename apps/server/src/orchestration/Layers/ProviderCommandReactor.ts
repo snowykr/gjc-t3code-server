@@ -1311,15 +1311,26 @@ const make = Effect.gen(function* () {
           })
           .pipe(
             Effect.zipRight(
-              setThreadSession({
-                threadId: event.payload.threadId,
-                session: {
-                  ...thread.session!,
-                  status: "running",
-                  activeTurnId: event.payload.turnId,
-                  updatedAt: event.payload.createdAt,
-                },
-                createdAt: event.payload.createdAt,
+              Effect.gen(function* () {
+                const liveThread = yield* resolveThread(event.payload.threadId);
+                if (
+                  liveThread?.session?.status !== "running" ||
+                  liveThread.session.activeTurnId !== event.payload.turnId ||
+                  liveThread.latestTurn?.turnId !== event.payload.turnId ||
+                  liveThread.latestTurn.state !== "interrupted"
+                ) {
+                  return;
+                }
+                yield* setThreadSession({
+                  threadId: event.payload.threadId,
+                  session: {
+                    ...liveThread.session,
+                    status: "running",
+                    activeTurnId: event.payload.turnId,
+                    updatedAt: event.payload.createdAt,
+                  },
+                  createdAt: event.payload.createdAt,
+                });
               }),
             ),
             Effect.zipRight(Effect.failCause(cause)),

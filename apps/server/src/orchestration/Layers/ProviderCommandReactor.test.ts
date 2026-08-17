@@ -150,6 +150,9 @@ describe("ProviderCommandReactor", () => {
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly steer?: "supported" | "unsupported";
     readonly steerTurnError?: string;
+    readonly interruptTurnEffect?: (input: {
+      readonly threadId: ThreadId;
+    }) => Effect.Effect<void, unknown>;
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
@@ -238,7 +241,11 @@ describe("ProviderCommandReactor", () => {
         turnId: asTurnId("turn-1"),
       }),
     );
-    const interruptTurn = vi.fn((_: unknown) => Effect.void);
+    const interruptTurn = vi.fn((rawInput: unknown) =>
+      input?.interruptTurnEffect
+        ? input.interruptTurnEffect(rawInput as { readonly threadId: ThreadId })
+        : Effect.void,
+    );
     const steerTurn = vi.fn((_: unknown) =>
       input?.steerTurnError
         ? Effect.fail(
@@ -2562,6 +2569,84 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
     expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({
       threadId: "thread-1",
+    });
+  });
+
+  it("does not restore a terminal session when interrupt failure races completion", async () => {
+    const releaseInterruptFailure = Effect.runSync(Deferred.make<void>());
+    const harness = await createHarness({
+      interruptTurnEffect: () =>
+        Deferred.await(releaseInterruptFailure).pipe(
+          Effect.zipRight(
+            Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: "codex",
+                method: "session/interrupt",
+                detail: "interrupt failed",
+              }),
+            ),
+          ),
+        ),
+    });
+    const interruptAt = "2026-01-01T00:00:00.000Z";
+    const completedAt = "2026-01-01T00:00:01.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-interrupt-race"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-interrupt-race"),
+          lastError: null,
+          updatedAt: interruptAt,
+        },
+        createdAt: interruptAt,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-turn-interrupt-race"),
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-interrupt-race"),
+        createdAt: interruptAt,
+      }),
+    );
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-completed-interrupt-race"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: completedAt,
+        },
+        createdAt: completedAt,
+      }),
+    );
+    await Effect.runPromise(Deferred.succeed(releaseInterruptFailure, undefined));
+    await harness.drain();
+
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(thread?.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      updatedAt: completedAt,
     });
   });
 
