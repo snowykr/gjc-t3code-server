@@ -2539,6 +2539,172 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
       }),
     );
 
+    it.effect("binds queued turn starts FIFO and consumes only the matching pending row", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-pending-turn-fifo");
+        const turnB = TurnId.make("turn-b");
+        const turnC = TurnId.make("turn-c");
+        const messageB = MessageId.make("message-b");
+        const messageC = MessageId.make("message-c");
+
+        yield* eventStore.append({
+          type: "thread.turn-start-requested",
+          eventId: EventId.make("evt-pending-fifo-request-b"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-02-26T15:00:01.000Z",
+          commandId: CommandId.make("cmd-pending-fifo-request-b"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-pending-fifo-request-b"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: messageB,
+            sourceProposedPlan: {
+              threadId: ThreadId.make("thread-plan-b"),
+              planId: "plan-b",
+            },
+            runtimeMode: "approval-required",
+            createdAt: "2026-02-26T15:00:01.000Z",
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.turn-start-requested",
+          eventId: EventId.make("evt-pending-fifo-request-c"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-02-26T15:00:02.000Z",
+          commandId: CommandId.make("cmd-pending-fifo-request-c"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-pending-fifo-request-c"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: messageC,
+            sourceProposedPlan: {
+              threadId: ThreadId.make("thread-plan-c"),
+              planId: "plan-c",
+            },
+            runtimeMode: "approval-required",
+            createdAt: "2026-02-26T15:00:02.000Z",
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-pending-fifo-start-b"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-02-26T15:00:03.000Z",
+          commandId: CommandId.make("cmd-pending-fifo-start-b"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-pending-fifo-start-b"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: turnB,
+              lastError: null,
+              updatedAt: "2026-02-26T15:00:03.000Z",
+            },
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+
+        const afterBRows = yield* sql<{
+          readonly turnId: string | null;
+          readonly pendingMessageId: string | null;
+          readonly sourceProposedPlanId: string | null;
+          readonly state: string;
+        }>`
+          SELECT
+            turn_id AS "turnId",
+            pending_message_id AS "pendingMessageId",
+            source_proposed_plan_id AS "sourceProposedPlanId",
+            state
+          FROM projection_turns
+          WHERE thread_id = ${threadId}
+          ORDER BY requested_at ASC, row_id ASC
+        `;
+        assert.deepEqual(afterBRows, [
+          {
+            turnId: turnB,
+            pendingMessageId: messageB,
+            sourceProposedPlanId: "plan-b",
+            state: "running",
+          },
+          {
+            turnId: null,
+            pendingMessageId: messageC,
+            sourceProposedPlanId: "plan-c",
+            state: "pending",
+          },
+        ]);
+
+        yield* eventStore.append({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-pending-fifo-start-c"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-02-26T15:00:04.000Z",
+          commandId: CommandId.make("cmd-pending-fifo-start-c"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-pending-fifo-start-c"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: turnC,
+              lastError: null,
+              updatedAt: "2026-02-26T15:00:04.000Z",
+            },
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+
+        const finalRows = yield* sql<{
+          readonly turnId: string | null;
+          readonly pendingMessageId: string | null;
+          readonly sourceProposedPlanId: string | null;
+          readonly state: string;
+        }>`
+          SELECT
+            turn_id AS "turnId",
+            pending_message_id AS "pendingMessageId",
+            source_proposed_plan_id AS "sourceProposedPlanId",
+            state
+          FROM projection_turns
+          WHERE thread_id = ${threadId}
+          ORDER BY requested_at ASC, row_id ASC
+        `;
+        assert.deepEqual(finalRows, [
+          {
+            turnId: turnB,
+            pendingMessageId: messageB,
+            sourceProposedPlanId: "plan-b",
+            state: "completed",
+          },
+          {
+            turnId: turnC,
+            pendingMessageId: messageC,
+            sourceProposedPlanId: "plan-c",
+            state: "running",
+          },
+        ]);
+      }),
+    );
     it.effect("retains queued starts only for an interrupted latest turn", () =>
       Effect.gen(function* () {
         const projectionPipeline = yield* OrchestrationProjectionPipeline;

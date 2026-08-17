@@ -10,6 +10,7 @@ import * as Struct from "effect/Struct";
 import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 import {
   ClearCheckpointTurnConflictInput,
+  DeleteProjectionPendingTurnStartByMessageInput,
   DeleteProjectionTurnsByThreadInput,
   GetProjectionPendingTurnStartInput,
   GetProjectionTurnByTurnIdInput,
@@ -197,7 +198,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           AND state = 'pending'
           AND pending_message_id IS NOT NULL
           AND checkpoint_turn_count IS NULL
-        ORDER BY requested_at DESC
+        ORDER BY requested_at ASC, row_id ASC
         LIMIT 1
       `,
   });
@@ -232,6 +233,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           END ASC,
           checkpoint_turn_count ASC,
           requested_at ASC,
+          row_id ASC,
           turn_id ASC
       `,
   });
@@ -300,27 +302,42 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
       ),
     );
 
-  const replacePendingTurnStart: ProjectionTurnRepositoryShape["replacePendingTurnStart"] = (row) =>
-    sql
-      .withTransaction(
-        clearPendingProjectionTurnsByThread({ threadId: row.threadId }).pipe(
-          Effect.flatMap(() => insertPendingProjectionTurn(row)),
+  const enqueuePendingTurnStart: ProjectionTurnRepositoryShape["enqueuePendingTurnStart"] = (row) =>
+    insertPendingProjectionTurn(row).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionTurnRepository.enqueuePendingTurnStart:query",
+          "ProjectionTurnRepository.enqueuePendingTurnStart:encodeRequest",
         ),
-      )
-      .pipe(
-        Effect.mapError(
-          toPersistenceSqlOrDecodeError(
-            "ProjectionTurnRepository.replacePendingTurnStart:query",
-            "ProjectionTurnRepository.replacePendingTurnStart:encodeRequest",
-          ),
-        ),
-      );
+      ),
+    );
 
   const getPendingTurnStartByThreadId: ProjectionTurnRepositoryShape["getPendingTurnStartByThreadId"] =
     (input) =>
       getPendingProjectionTurn(input).pipe(
         Effect.mapError(
           toPersistenceSqlError("ProjectionTurnRepository.getPendingTurnStartByThreadId:query"),
+        ),
+      );
+
+  const deletePendingProjectionTurnByMessage = SqlSchema.void({
+    Request: DeleteProjectionPendingTurnStartByMessageInput,
+    execute: ({ threadId, messageId }) =>
+      sql`
+        DELETE FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND pending_message_id = ${messageId}
+          AND turn_id IS NULL
+          AND state = 'pending'
+          AND checkpoint_turn_count IS NULL
+      `,
+  });
+
+  const deletePendingTurnStartByMessageId: ProjectionTurnRepositoryShape["deletePendingTurnStartByMessageId"] =
+    (input) =>
+      deletePendingProjectionTurnByMessage(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionTurnRepository.deletePendingTurnStartByMessageId:query"),
         ),
       );
 
@@ -374,8 +391,9 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
 
   return {
     upsertByTurnId,
-    replacePendingTurnStart,
+    enqueuePendingTurnStart,
     getPendingTurnStartByThreadId,
+    deletePendingTurnStartByMessageId,
     deletePendingTurnStartByThreadId,
     listByThreadId,
     getByTurnId,

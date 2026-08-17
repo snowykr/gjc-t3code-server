@@ -96,6 +96,13 @@ export const GetProjectionPendingTurnStartInput = Schema.Struct({
 });
 export type GetProjectionPendingTurnStartInput = typeof GetProjectionPendingTurnStartInput.Type;
 
+export const DeleteProjectionPendingTurnStartByMessageInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+});
+export type DeleteProjectionPendingTurnStartByMessageInput =
+  typeof DeleteProjectionPendingTurnStartByMessageInput.Type;
+
 export const DeleteProjectionTurnsByThreadInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -117,21 +124,29 @@ export interface ProjectionTurnRepositoryShape {
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
-   * Replaces any existing pending-start placeholder rows for a thread with exactly one latest pending-start row.
+   * Appends a pending-start placeholder row to the thread's FIFO queue.
    */
-  readonly replacePendingTurnStart: (
+  readonly enqueuePendingTurnStart: (
     row: ProjectionPendingTurnStart,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
-   * Returns the newest pending-start placeholder for a thread; this is expected to be at most one row after replacement writes.
+   * Returns the oldest pending-start placeholder for a thread.
    */
   readonly getPendingTurnStartByThreadId: (
     input: GetProjectionPendingTurnStartInput,
   ) => Effect.Effect<Option.Option<ProjectionPendingTurnStart>, ProjectionRepositoryError>;
 
   /**
-   * Deletes only pending-start placeholder rows (`turnId = null`) for a thread and leaves concrete turn rows untouched.
+   * Deletes one consumed pending-start placeholder by its source message.
+   */
+  readonly deletePendingTurnStartByMessageId: (
+    input: DeleteProjectionPendingTurnStartByMessageInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Deletes all pending-start placeholder rows for an explicit terminal/startup cleanup path,
+   * leaving concrete turn rows untouched.
    */
   readonly deletePendingTurnStartByThreadId: (
     input: GetProjectionPendingTurnStartInput,
