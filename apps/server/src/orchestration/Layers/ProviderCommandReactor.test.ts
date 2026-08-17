@@ -30,6 +30,7 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -58,7 +59,7 @@ import {
   ProviderCommandReactorLive,
 } from "./ProviderCommandReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
-import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
+import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -163,6 +164,8 @@ describe("ProviderCommandReactor", () => {
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
     readonly pendingTurnBeforeStart?: boolean;
+    readonly checkpointReactor?: Partial<CheckpointReactorShape>;
+    readonly useTestClock?: boolean;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
@@ -428,6 +431,7 @@ describe("ProviderCommandReactor", () => {
           registerAbortCheckpoint: () => Effect.void,
           cancelAbortCheckpoint: () => Effect.void,
           reconcileInterruptedTurn: () => Effect.void,
+          ...input?.checkpointReactor,
         }),
       ),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
@@ -458,7 +462,9 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
     );
-    runtime = ManagedRuntime.make(layer);
+    runtime = ManagedRuntime.make(
+      input?.useTestClock === true ? layer.pipe(Layer.provideMerge(TestClock.layer())) : layer,
+    );
 
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
@@ -652,6 +658,122 @@ describe("ProviderCommandReactor", () => {
     if (Option.isSome(pendingTurnStart)) {
       expect(pendingTurnStart.value.messageId).toBe(asMessageId("fresh-pending-message"));
     }
+  });
+
+  it("releases other threads when a terminal abort event is withheld", async () => {
+    const abortWaitStarted = Effect.runSync(Deferred.make<void>());
+    const awaitAbortCheckpoint = vi.fn(() =>
+      Deferred.await(abortWaitStarted).pipe(Effect.as(true)),
+    );
+    const cancelAbortCheckpoint = vi.fn(() => Effect.void);
+    const reconcileInterruptedTurn = vi.fn(() => Effect.void);
+    const harness = await createHarness({
+      useTestClock: true,
+      checkpointReactor: {
+        awaitAbortCheckpoint,
+        cancelAbortCheckpoint,
+        reconcileInterruptedTurn,
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-create-withheld-terminal-peer"),
+        threadId: ThreadId.make("thread-2"),
+        projectId: asProjectId("project-1"),
+        title: "Thread 2",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-withheld-terminal"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-withheld"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-withheld-terminal"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-withheld-terminal"),
+          role: "user",
+          text: "queued behind withheld terminal",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => awaitAbortCheckpoint.mock.calls.length === 1);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-peer-after-withheld-terminal"),
+        threadId: ThreadId.make("thread-2"),
+        message: {
+          messageId: asMessageId("message-peer-after-withheld-terminal"),
+          role: "user",
+          text: "peer remains live",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await harness.runEffect(TestClock.adjust("30 seconds"));
+    await harness.runEffect(Effect.yieldNow);
+    await waitFor(
+      () =>
+        harness.sendTurn.mock.calls.some((call) => call[0]?.threadId === ThreadId.make("thread-2")),
+      2_000,
+    );
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
+    ).toMatchObject({
+      payload: {
+        detail: expect.stringContaining("Timed out waiting for terminal abort event"),
+      },
+    });
+    expect(Option.isNone(await harness.pendingTurnStart())).toBe(true);
+    expect(reconcileInterruptedTurn).toHaveBeenCalledWith({
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-withheld"),
+    });
+    expect(cancelAbortCheckpoint).toHaveBeenCalledWith({
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-withheld"),
+    });
   });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>

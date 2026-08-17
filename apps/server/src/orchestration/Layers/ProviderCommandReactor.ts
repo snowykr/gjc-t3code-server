@@ -95,6 +95,7 @@ const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
 
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
+const ABORT_GATE_WAIT = Duration.seconds(30);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const DEFAULT_THREAD_TITLE = "New thread";
 const MAX_REGENERATION_ATTACHMENTS = 4;
@@ -409,6 +410,39 @@ const make = Effect.gen(function* () {
           );
         }),
       );
+
+  const reconcileAbortGate = Effect.fn("reconcileAbortGate")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+  }) {
+    yield* checkpointReactor.reconcileInterruptedTurn(input).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("failed to reconcile interrupted checkpoint before turn start", {
+          threadId: input.threadId,
+          turnId: input.turnId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
+
+    // Reconciliation completes the gate synchronously when it succeeds. A
+    // zero-duration probe observes that completion without allowing a
+    // withheld terminal event to reintroduce an unbounded wait.
+    const reconciled = yield* checkpointReactor
+      .awaitAbortCheckpoint(input)
+      .pipe(Effect.timeoutOption(Duration.zero));
+    if (Option.isSome(reconciled) && reconciled.value) {
+      return true;
+    }
+
+    yield* checkpointReactor.cancelAbortCheckpoint(input);
+    return false;
+  });
+
+  const awaitAbortCheckpointBounded = (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+  }) => checkpointReactor.awaitAbortCheckpoint(input).pipe(Effect.timeoutOption(ABORT_GATE_WAIT));
 
   const sanitizeProviderFailureDetail = (provider: string, detail: string): string => {
     // Authentication-failure classification already happens at the adapter
@@ -1138,11 +1172,27 @@ const make = Effect.gen(function* () {
 
     let observedActiveAbortCheckpoint = false;
     if (thread.session?.status === "running" && thread.session.activeTurnId !== null) {
-      observedActiveAbortCheckpoint = yield* checkpointReactor.awaitAbortCheckpoint({
+      const abortCheckpoint = yield* awaitAbortCheckpointBounded({
         threadId: event.payload.threadId,
         turnId: thread.session.activeTurnId,
       });
-      if (observedActiveAbortCheckpoint) {
+      if (Option.isNone(abortCheckpoint)) {
+        observedActiveAbortCheckpoint = yield* reconcileAbortGate({
+          threadId: event.payload.threadId,
+          turnId: thread.session.activeTurnId,
+        });
+        if (!observedActiveAbortCheckpoint) {
+          return yield* appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.turn.start.failed",
+            summary: "Provider turn start blocked",
+            detail: `Timed out waiting for terminal abort event for turn '${thread.session.activeTurnId}'.`,
+            turnId: thread.session.activeTurnId,
+            createdAt: event.payload.createdAt,
+          }).pipe(Effect.ensuring(cleanupRejectedTurnStart(event)));
+        }
+      } else if (abortCheckpoint.value) {
+        observedActiveAbortCheckpoint = true;
         // The terminal event is already in flight. Continue to the normal
         // checkpoint/start gate below instead of dropping this queued turn.
       } else {
@@ -1236,32 +1286,29 @@ const make = Effect.gen(function* () {
         turn.state === "interrupted",
     );
     if (interruptedTurn?.turnId !== null && interruptedTurn?.turnId !== undefined) {
-      const observedAbortCheckpoint =
+      const observedAbortCheckpointResult =
         observedActiveAbortCheckpoint && thread.session?.activeTurnId === interruptedTurn.turnId
+          ? Option.some(true)
+          : yield* awaitAbortCheckpointBounded({
+              threadId: event.payload.threadId,
+              turnId: interruptedTurn.turnId,
+            });
+      const observedAbortCheckpoint =
+        Option.isSome(observedAbortCheckpointResult) && observedAbortCheckpointResult.value
           ? true
-          : yield* checkpointReactor.awaitAbortCheckpoint({
+          : yield* reconcileAbortGate({
               threadId: event.payload.threadId,
               turnId: interruptedTurn.turnId,
             });
       if (!observedAbortCheckpoint) {
-        yield* checkpointReactor
-          .reconcileInterruptedTurn({
-            threadId: event.payload.threadId,
-            turnId: interruptedTurn.turnId,
-          })
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("failed to reconcile interrupted checkpoint before turn start", {
-                threadId: event.payload.threadId,
-                turnId: interruptedTurn.turnId,
-                cause: Cause.pretty(cause),
-              }),
-            ),
-          );
-        yield* checkpointReactor.awaitAbortCheckpoint({
+        return yield* appendProviderFailureActivity({
           threadId: event.payload.threadId,
+          kind: "provider.turn.start.failed",
+          summary: "Provider turn start blocked",
+          detail: `Unable to observe terminal abort event for turn '${interruptedTurn.turnId}'.`,
           turnId: interruptedTurn.turnId,
-        });
+          createdAt: event.payload.createdAt,
+        }).pipe(Effect.ensuring(cleanupRejectedTurnStart(event)));
       }
     }
 
