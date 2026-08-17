@@ -100,7 +100,9 @@ const make = Effect.gen(function* () {
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
-  const abortCheckpointDeferreds = yield* Ref.make(new Map<string, Deferred.Deferred<void>>());
+  const abortCheckpointDeferreds = yield* Ref.make(
+    new Map<string, Deferred.Deferred<void> | "completed">(),
+  );
   const registerAbortCheckpoint = Effect.fn("registerAbortCheckpoint")(function* (input: {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
@@ -122,16 +124,20 @@ const make = Effect.gen(function* () {
     const deferred = yield* Ref.modify(abortCheckpointDeferreds, (current) => {
       const next = new Map(current);
       const value = next.get(key);
-      next.delete(key);
+      next.set(key, "completed");
       return [value, next] as const;
     });
-    if (deferred !== undefined) yield* Deferred.succeed(deferred, undefined);
+    if (deferred !== undefined && deferred !== "completed") {
+      yield* Deferred.succeed(deferred, undefined);
+    }
   });
   const awaitAbortCheckpoint = (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
     Ref.get(abortCheckpointDeferreds).pipe(
       Effect.flatMap((current) => {
         const deferred = current.get(abortCheckpointKey(input.threadId, input.turnId));
-        return deferred === undefined ? Effect.void : Deferred.await(deferred);
+        return deferred === undefined || deferred === "completed"
+          ? Effect.void
+          : Deferred.await(deferred);
       }),
     );
 

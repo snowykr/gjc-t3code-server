@@ -211,9 +211,7 @@ async function waitForReceipt(
   const deadline = (await Effect.runPromise(Clock.currentTimeMillis)) + timeoutMs;
   const poll = async (): Promise<OrchestrationRuntimeReceipt> => {
     const receipt = receipts.find(predicate);
-    if (receipt) {
-      return receipt;
-    }
+    if (receipt) return receipt;
     if ((await Effect.runPromise(Clock.currentTimeMillis)) >= deadline) {
       throw new Error("Timed out waiting for checkpoint receipt.");
     }
