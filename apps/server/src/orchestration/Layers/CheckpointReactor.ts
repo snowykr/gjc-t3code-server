@@ -129,13 +129,16 @@ const make = Effect.gen(function* () {
   const completeAbortCheckpoint = Effect.fn("completeAbortCheckpoint")(function* (input: {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
-    readonly preserveCompletion: boolean;
+    readonly captured: boolean;
   }) {
+    if (!input.captured) {
+      return;
+    }
     const key = abortCheckpointKey(input.threadId, input.turnId);
     const deferred = yield* Ref.modify(abortCheckpointDeferreds, (current) => {
       const next = new Map(current);
       const value = next.get(key);
-      if (value !== undefined || input.preserveCompletion) next.set(key, "completed");
+      if (value !== undefined) next.set(key, "completed");
       return [value, next] as const;
     });
     if (deferred !== undefined && deferred !== "completed") {
@@ -232,15 +235,12 @@ const make = Effect.gen(function* () {
       createdAt: yield* nowIso,
       payload: { reason: "Recovered interrupted turn checkpoint" },
     };
-    yield* captureCheckpointFromTurnTerminal(event).pipe(
-      Effect.ensuring(
-        completeAbortCheckpoint({
-          threadId: input.threadId,
-          turnId: input.turnId,
-          preserveCompletion: true,
-        }),
-      ),
-    );
+    const captured = yield* captureCheckpointFromTurnTerminal(event);
+    yield* completeAbortCheckpoint({
+      threadId: input.threadId,
+      turnId: input.turnId,
+      captured: captured === true,
+    });
   });
 
   const appendRevertFailureActivity = (input: {
@@ -1188,16 +1188,7 @@ const make = Effect.gen(function* () {
       const turnId = toTurnId(event.turnId);
       if (event.type === "turn.aborted" && turnId) {
         const capturedRef = yield* Ref.make(false);
-        const acceptedAbortRef = yield* Ref.make(false);
         yield* Effect.gen(function* () {
-          const thread = yield* resolveThreadDetail(event.threadId);
-          const acceptedAbort =
-            thread?.session?.status === "running" && sameId(thread.session.activeTurnId, turnId)
-              ? true
-              : (yield* Ref.get(abortCheckpointDeferreds)).has(
-                  abortCheckpointKey(event.threadId, turnId),
-                );
-          yield* Ref.set(acceptedAbortRef, acceptedAbort);
           yield* refreshLocalGitStatusFromTurnTerminal(event);
           const captured = yield* captureCheckpointFromTurnTerminal(event).pipe(
             Effect.catch((error) =>
@@ -1216,22 +1207,18 @@ const make = Effect.gen(function* () {
           Effect.ensuring(
             Ref.get(capturedRef).pipe(
               Effect.flatMap((captured) =>
-                Ref.get(acceptedAbortRef).pipe(
-                  Effect.flatMap((accepted) =>
-                    completeAbortCheckpoint({
-                      threadId: event.threadId,
-                      turnId,
-                      preserveCompletion: captured || accepted,
-                    }),
-                  ),
-                ),
+                completeAbortCheckpoint({
+                  threadId: event.threadId,
+                  turnId,
+                  captured,
+                }),
               ),
             ),
           ),
         );
       } else {
         yield* refreshLocalGitStatusFromTurnTerminal(event);
-        yield* captureCheckpointFromTurnTerminal(event).pipe(
+        const captured = yield* captureCheckpointFromTurnTerminal(event).pipe(
           Effect.catch((error) =>
             Effect.flatMap(nowIso, (createdAt) =>
               appendCaptureFailureActivity({
@@ -1240,15 +1227,11 @@ const make = Effect.gen(function* () {
                 detail: error.message,
                 createdAt,
               }).pipe(Effect.catch(() => Effect.void)),
-            ),
+            ).pipe(Effect.as(false)),
           ),
         );
-        if (turnId) {
-          yield* completeAbortCheckpoint({
-            threadId: event.threadId,
-            turnId,
-            preserveCompletion: false,
-          });
+        if (turnId && captured === true) {
+          yield* cancelAbortCheckpoint({ threadId: event.threadId, turnId });
         }
       }
       return;

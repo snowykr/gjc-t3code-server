@@ -345,6 +345,7 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  const pendingProviderRuntimeAcks = new Map<string, { settled: boolean }>();
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -1170,6 +1171,19 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    const threadKey = String(event.payload.threadId);
+    if (pendingProviderRuntimeAcks.has(threadKey)) {
+      yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.start.failed",
+        summary: "Provider turn start blocked",
+        detail: `Thread '${event.payload.threadId}' is waiting for the provider runtime to acknowledge the previous turn start.`,
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      }).pipe(Effect.ensuring(cleanupRejectedTurnStart(event)));
+      return;
+    }
+
     let observedActiveAbortCheckpoint = false;
     if (thread.session?.status === "running" && thread.session.activeTurnId !== null) {
       const abortCheckpoint = yield* awaitAbortCheckpointBounded({
@@ -1330,9 +1344,23 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    const dispatchBarrier = { settled: false };
+    const clearDispatchBarrier = Effect.sync(() => {
+      dispatchBarrier.settled = true;
+      if (pendingProviderRuntimeAcks.get(threadKey) === dispatchBarrier) {
+        pendingProviderRuntimeAcks.delete(threadKey);
+      }
+    });
+    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.tap(() => clearDispatchBarrier),
+      Effect.catchCause((cause) =>
+        clearDispatchBarrier.pipe(Effect.andThen(recoverTurnStartFailure(cause))),
+      ),
+      Effect.forkScoped,
+    );
+    if (!dispatchBarrier.settled) {
+      pendingProviderRuntimeAcks.set(threadKey, dispatchBarrier);
+    }
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (

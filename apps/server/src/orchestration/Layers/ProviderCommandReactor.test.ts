@@ -157,6 +157,9 @@ describe("ProviderCommandReactor", () => {
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly steer?: "supported" | "unsupported";
     readonly steerTurnError?: string;
+    readonly sendTurnEffect?: (
+      input: unknown,
+    ) => Effect.Effect<{ readonly threadId: ThreadId; readonly turnId: TurnId }, unknown>;
     readonly interruptTurnEffect?: (input: {
       readonly threadId: ThreadId;
     }) => Effect.Effect<void, unknown>;
@@ -245,11 +248,13 @@ describe("ProviderCommandReactor", () => {
         ),
       );
     });
-    const sendTurn = vi.fn((_: unknown) =>
-      Effect.succeed({
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-1"),
-      }),
+    const sendTurn = vi.fn(
+      (rawInput: unknown) =>
+        input?.sendTurnEffect?.(rawInput) ??
+        Effect.succeed({
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        }),
     );
     const interruptTurn = vi.fn((rawInput: unknown) =>
       input?.interruptTurnEffect
@@ -628,6 +633,127 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("rejects a queued follow-up while the previous provider turn start awaits acknowledgement", async () => {
+    const releaseB = Effect.runSync(Deferred.make<void>());
+    const harness = await createHarness({
+      sendTurnEffect: () =>
+        Deferred.await(releaseB).pipe(
+          Effect.as({ threadId: ThreadId.make("thread-1"), turnId: asTurnId("turn-b") }),
+        ),
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-b-barrier"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-b-barrier"),
+          role: "user",
+          text: "turn B",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-c-barrier"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-c-barrier"),
+          role: "user",
+          text: "turn C",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      return (
+        readModel.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ?? false
+      );
+    });
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    const pendingTurnStart = await harness.pendingTurnStart();
+    expect(Option.isSome(pendingTurnStart)).toBe(true);
+    if (Option.isSome(pendingTurnStart)) {
+      expect(pendingTurnStart.value.messageId).toBe(asMessageId("user-message-b-barrier"));
+    }
+
+    await Effect.runPromise(Deferred.succeed(releaseB, undefined));
+  });
+
+  it("clears the provider turn-start barrier when the provider acknowledgement succeeds", async () => {
+    const releaseB = Effect.runSync(Deferred.make<void>());
+    const harness = await createHarness({
+      sendTurnEffect: () =>
+        Deferred.await(releaseB).pipe(
+          Effect.as({ threadId: ThreadId.make("thread-1"), turnId: asTurnId("turn-b") }),
+        ),
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-b-ack"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-b-ack"),
+          role: "user",
+          text: "turn B",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    await Effect.runPromise(Deferred.succeed(releaseB, undefined));
+    await Effect.runPromise(Effect.yieldNow);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-c-ack"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-c-ack"),
+          role: "user",
+          text: "turn C",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
+    ).toBeUndefined();
   });
 
   it("clears orphaned pending starts before accepting new requests", async () => {

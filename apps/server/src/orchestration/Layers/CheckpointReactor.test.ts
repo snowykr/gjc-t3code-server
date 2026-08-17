@@ -496,6 +496,10 @@ describe("CheckpointReactor", () => {
         runtime!.runPromise(reactor.registerAbortCheckpoint(input)),
       awaitAbortCheckpoint: (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
         runtime!.runPromise(reactor.awaitAbortCheckpoint(input)),
+      awaitAbortCheckpointEffect: (input: {
+        readonly threadId: ThreadId;
+        readonly turnId: TurnId;
+      }) => reactor.awaitAbortCheckpoint(input),
       reconcileInterruptedTurn: (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
         runtime!.runPromise(reactor.reconcileInterruptedTurn(input)),
     };
@@ -1143,6 +1147,105 @@ describe("CheckpointReactor", () => {
       payload: { reason: "user requested interruption again" },
     });
     expect(await thirdWaiter).toBe(true);
+  });
+
+  it("keeps an abort gate pending when terminal checkpoint capture fails", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-abort-capture-failure");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const checkpointRef = checkpointRefForThreadTurn(threadId, 1);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-abort-capture-failure"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-abort-capture-failure"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId,
+    });
+    await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0));
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "aborted work\n", "utf8");
+
+    // Block update-ref for the terminal checkpoint while leaving the worktree
+    // detectable as a Git repository. The capture must fail after the turn's
+    // gate has been registered, with no durable terminal ref to release it.
+    const checkpointPath = NodePath.join(harness.cwd, ".git", checkpointRef);
+    NodeFS.mkdirSync(checkpointPath, {
+      recursive: true,
+    });
+    NodeFS.writeFileSync(NodePath.join(checkpointPath, "block"), "not a ref", "utf8");
+    await harness.registerAbortCheckpoint({ threadId, turnId });
+    harness.provider.emit({
+      type: "turn.aborted",
+      eventId: EventId.make("evt-turn-aborted-capture-failure"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId,
+      payload: { reason: "user requested interruption" },
+    });
+
+    const failedThread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "checkpoint.capture.failed"),
+    );
+    await harness.drain();
+
+    const blocked = await runtime!.runPromise(
+      harness
+        .awaitAbortCheckpointEffect({ threadId, turnId })
+        .pipe(Effect.timeoutOption("20 millis")),
+    );
+    expect(blocked._tag).toBe("None");
+    expect(failedThread.checkpoints).toHaveLength(1);
+    expect(failedThread.checkpoints[0]?.status).toBe("missing");
+    expect(gitRefExists(harness.cwd, checkpointRef)).toBe(false);
+    expect(
+      harness.receipts.filter(
+        (receipt) => receipt.type === "checkpoint.diff.finalized" && receipt.turnId === turnId,
+      ),
+    ).toHaveLength(0);
+
+    // A later terminal event may retry the pending gate. It is released only
+    // after the Git ref becomes durable, never by the failed attempt itself.
+    NodeFS.rmSync(checkpointPath, { recursive: true, force: true });
+    harness.provider.emit({
+      type: "turn.aborted",
+      eventId: EventId.make("evt-turn-aborted-capture-retry"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId,
+      payload: { reason: "retry terminal capture" },
+    });
+
+    await waitForReceipt(
+      harness.receipts,
+      (receipt) =>
+        receipt.type === "checkpoint.diff.finalized" &&
+        receipt.turnId === turnId &&
+        receipt.status === "ready",
+    );
+    expect(await harness.awaitAbortCheckpoint({ threadId, turnId })).toBe(true);
+    expect(gitRefExists(harness.cwd, checkpointRef)).toBe(true);
   });
 
   it("checkpoints an interrupted turn after a newer turn has started", async () => {
