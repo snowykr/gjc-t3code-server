@@ -34,6 +34,7 @@ import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionT
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -893,6 +894,7 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
+  const checkpointReactor = yield* CheckpointReactor;
   const serverSettingsService = yield* ServerSettingsService;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
@@ -1561,6 +1563,17 @@ const make = Effect.gen(function* () {
 
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
+      if (
+        event.type === "turn.completed" &&
+        (normalizeRuntimeTurnState(event.payload.state) === "cancelled" ||
+          normalizeRuntimeTurnState(event.payload.state) === "interrupted")
+      ) {
+        return yield* processRuntimeEvent({
+          ...event,
+          type: "turn.aborted",
+          payload: { reason: event.payload.stopReason ?? "Provider turn cancelled" },
+        });
+      }
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
 
@@ -1627,6 +1640,15 @@ const make = Effect.gen(function* () {
             // all — and applying it here stomps the "starting" lifecycle
             // state while a turn start is pending.
             return eventTurnId !== undefined;
+          case "turn.aborted":
+            // An abort cannot recover a missing turn.started: accepting a
+            // stale abort without an active turn would interrupt a newly
+            // starting session and discard its pending turn start.
+            return (
+              activeTurnId !== null &&
+              eventTurnId !== undefined &&
+              sameId(activeTurnId, eventTurnId)
+            );
           default:
             return true;
         }
@@ -1642,7 +1664,8 @@ const make = Effect.gen(function* () {
         event.type === "session.exited" ||
         event.type === "thread.started" ||
         event.type === "turn.started" ||
-        event.type === "turn.completed"
+        event.type === "turn.completed" ||
+        event.type === "turn.aborted"
       ) {
         const status = (() => {
           switch (event.type) {
@@ -1658,6 +1681,8 @@ const make = Effect.gen(function* () {
               return normalizeRuntimeTurnState(event.payload.state) === "failed"
                 ? "error"
                 : "ready";
+            case "turn.aborted":
+              return "interrupted";
             case "session.started":
             case "thread.started":
               // Provider thread/session start notifications can arrive during an
@@ -1668,7 +1693,9 @@ const make = Effect.gen(function* () {
         const nextActiveTurnId =
           event.type === "turn.started"
             ? (eventTurnId ?? null)
-            : event.type === "turn.completed" || event.type === "session.exited"
+            : event.type === "turn.completed" ||
+                event.type === "turn.aborted" ||
+                event.type === "session.exited"
               ? null
               : event.type === "session.state.changed" &&
                   !sessionStatusAllowsActiveTurn(
@@ -1711,6 +1738,12 @@ const make = Effect.gen(function* () {
             : thread.session?.adapterCapabilities;
 
         if (shouldApplyThreadLifecycle) {
+          if (event.type === "turn.aborted" && eventTurnId !== undefined) {
+            yield* checkpointReactor.registerAbortCheckpoint({
+              threadId: thread.id,
+              turnId: eventTurnId,
+            });
+          }
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
             yield* markSourceProposedPlanImplemented(
               acceptedTurnStartedSourcePlan.sourceThreadId,
@@ -1748,6 +1781,11 @@ const make = Effect.gen(function* () {
               lastError,
               updatedAt: now,
             },
+            ...(event.type === "turn.aborted" &&
+            shouldApplyThreadLifecycle &&
+            eventTurnId !== undefined
+              ? { interruptedTurnId: eventTurnId }
+              : {}),
             createdAt: now,
           });
         }
@@ -1954,7 +1992,10 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (event.type === "turn.completed") {
+      if (
+        event.type === "turn.completed" ||
+        (event.type === "turn.aborted" && shouldApplyThreadLifecycle)
+      ) {
         const detailedThread = yield* getLoadedThreadDetail();
         const messages = detailedThread?.messages ?? [];
         const proposedPlans = detailedThread?.proposedPlans ?? [];

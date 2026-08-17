@@ -492,6 +492,11 @@ export function applyThreadDetailEvent(
         thread.session.activeTurnId === event.payload.turnId;
       const latestTurn =
         !diffTurnStillRunning &&
+        !(
+          thread.latestTurn?.turnId === event.payload.turnId &&
+          thread.latestTurn.state === "interrupted" &&
+          thread.session?.status === "interrupted"
+        ) &&
         (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
           ? {
               turnId: event.payload.turnId,

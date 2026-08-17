@@ -23,7 +23,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makeDrainableWorker, type DrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
@@ -33,6 +33,8 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { sanitizeThreadTitle } from "../../textGeneration/TextGenerationUtils.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -93,6 +95,7 @@ const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
 
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
+const ABORT_GATE_WAIT = Duration.seconds(30);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const DEFAULT_THREAD_TITLE = "New thread";
 const MAX_REGENERATION_ATTACHMENTS = 4;
@@ -317,7 +320,9 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerService = yield* ProviderService;
+  const checkpointReactor = yield* CheckpointReactor;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -340,6 +345,7 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  const pendingProviderRuntimeAcks = new Map<string, { settled: boolean }>();
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -381,6 +387,63 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+
+  const cleanupRejectedTurnStart = (
+    event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
+  ) =>
+    projectionTurnRepository
+      .deletePendingTurnStartByMessageId({
+        threadId: event.payload.threadId,
+        messageId: event.payload.messageId,
+      })
+      .pipe(
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) {
+            return Effect.failCause(cause);
+          }
+          return Effect.logWarning(
+            "provider command reactor failed to clean up rejected turn start",
+            {
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              cause: Cause.pretty(cause),
+            },
+          );
+        }),
+      );
+
+  const reconcileAbortGate = Effect.fn("reconcileAbortGate")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+  }) {
+    yield* checkpointReactor.reconcileInterruptedTurn(input).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("failed to reconcile interrupted checkpoint before turn start", {
+          threadId: input.threadId,
+          turnId: input.turnId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
+
+    // Reconciliation completes the gate synchronously when it succeeds. A
+    // zero-duration probe observes that completion without allowing a
+    // withheld terminal event to reintroduce an unbounded wait.
+    const reconciled = yield* checkpointReactor
+      .awaitAbortCheckpoint(input)
+      .pipe(Effect.timeoutOption(Duration.zero));
+    if (Option.isSome(reconciled) && reconciled.value) {
+      return true;
+    }
+
+    yield* checkpointReactor.cancelAbortCheckpoint(input);
+    return false;
+  });
+
+  const awaitAbortCheckpointBounded = (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+  }) => checkpointReactor.awaitAbortCheckpoint(input).pipe(Effect.timeoutOption(ABORT_GATE_WAIT));
 
   const sanitizeProviderFailureDetail = (provider: string, detail: string): string => {
     // Authentication-failure classification already happens at the adapter
@@ -1091,6 +1154,7 @@ const make = Effect.gen(function* () {
 
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
+      yield* cleanupRejectedTurnStart(event);
       return;
     }
 
@@ -1103,8 +1167,58 @@ const make = Effect.gen(function* () {
         detail: `User message '${event.payload.messageId}' was not found for turn start request.`,
         turnId: null,
         createdAt: event.payload.createdAt,
-      });
+      }).pipe(Effect.ensuring(cleanupRejectedTurnStart(event)));
       return;
+    }
+
+    const threadKey = String(event.payload.threadId);
+    if (pendingProviderRuntimeAcks.has(threadKey)) {
+      yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.start.failed",
+        summary: "Provider turn start blocked",
+        detail: `Thread '${event.payload.threadId}' is waiting for the provider runtime to acknowledge the previous turn start.`,
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      }).pipe(Effect.ensuring(cleanupRejectedTurnStart(event)));
+      return;
+    }
+
+    let observedActiveAbortCheckpoint = false;
+    if (thread.session?.status === "running" && thread.session.activeTurnId !== null) {
+      const abortCheckpoint = yield* awaitAbortCheckpointBounded({
+        threadId: event.payload.threadId,
+        turnId: thread.session.activeTurnId,
+      });
+      if (Option.isNone(abortCheckpoint)) {
+        observedActiveAbortCheckpoint = yield* reconcileAbortGate({
+          threadId: event.payload.threadId,
+          turnId: thread.session.activeTurnId,
+        });
+        if (!observedActiveAbortCheckpoint) {
+          return yield* appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.turn.start.failed",
+            summary: "Provider turn start blocked",
+            detail: `Timed out waiting for terminal abort event for turn '${thread.session.activeTurnId}'.`,
+            turnId: thread.session.activeTurnId,
+            createdAt: event.payload.createdAt,
+          }).pipe(Effect.ensuring(cleanupRejectedTurnStart(event)));
+        }
+      } else if (abortCheckpoint.value) {
+        observedActiveAbortCheckpoint = true;
+        // The terminal event is already in flight. Continue to the normal
+        // checkpoint/start gate below instead of dropping this queued turn.
+      } else {
+        return yield* appendProviderFailureActivity({
+          threadId: event.payload.threadId,
+          kind: "provider.turn.start.failed",
+          summary: "Provider turn start blocked",
+          detail: `Thread already has active turn '${thread.session.activeTurnId}'.`,
+          turnId: thread.session.activeTurnId,
+          createdAt: event.payload.createdAt,
+        }).pipe(Effect.ensuring(cleanupRejectedTurnStart(event)));
+      }
     }
 
     const isFirstUserMessageTurn =
@@ -1159,6 +1273,7 @@ const make = Effect.gen(function* () {
             createdAt: event.payload.createdAt,
           }),
         ),
+        Effect.ensuring(cleanupRejectedTurnStart(event)),
         Effect.asVoid,
       );
     };
@@ -1174,6 +1289,42 @@ const make = Effect.gen(function* () {
           }),
         ),
       );
+
+    const interruptedTurns = yield* projectionTurnRepository.listByThreadId({
+      threadId: event.payload.threadId,
+    });
+    const interruptedTurn = interruptedTurns.find(
+      (turn) =>
+        turn.turnId !== null &&
+        turn.turnId === thread.latestTurn?.turnId &&
+        turn.state === "interrupted",
+    );
+    if (interruptedTurn?.turnId !== null && interruptedTurn?.turnId !== undefined) {
+      const observedAbortCheckpointResult =
+        observedActiveAbortCheckpoint && thread.session?.activeTurnId === interruptedTurn.turnId
+          ? Option.some(true)
+          : yield* awaitAbortCheckpointBounded({
+              threadId: event.payload.threadId,
+              turnId: interruptedTurn.turnId,
+            });
+      const observedAbortCheckpoint =
+        Option.isSome(observedAbortCheckpointResult) && observedAbortCheckpointResult.value
+          ? true
+          : yield* reconcileAbortGate({
+              threadId: event.payload.threadId,
+              turnId: interruptedTurn.turnId,
+            });
+      if (!observedAbortCheckpoint) {
+        return yield* appendProviderFailureActivity({
+          threadId: event.payload.threadId,
+          kind: "provider.turn.start.failed",
+          summary: "Provider turn start blocked",
+          detail: `Unable to observe terminal abort event for turn '${interruptedTurn.turnId}'.`,
+          turnId: interruptedTurn.turnId,
+          createdAt: event.payload.createdAt,
+        }).pipe(Effect.ensuring(cleanupRejectedTurnStart(event)));
+      }
+    }
 
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
@@ -1193,9 +1344,23 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    const dispatchBarrier = { settled: false };
+    const clearDispatchBarrier = Effect.sync(() => {
+      dispatchBarrier.settled = true;
+      if (pendingProviderRuntimeAcks.get(threadKey) === dispatchBarrier) {
+        pendingProviderRuntimeAcks.delete(threadKey);
+      }
+    });
+    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.tap(() => clearDispatchBarrier),
+      Effect.catchCause((cause) =>
+        clearDispatchBarrier.pipe(Effect.andThen(recoverTurnStartFailure(cause))),
+      ),
+      Effect.forkScoped,
+    );
+    if (!dispatchBarrier.settled) {
+      pendingProviderRuntimeAcks.set(threadKey, dispatchBarrier);
+    }
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
@@ -1217,8 +1382,61 @@ const make = Effect.gen(function* () {
       });
     }
 
+    if (
+      thread.session?.status !== "running" ||
+      event.payload.turnId === undefined ||
+      thread.session.activeTurnId !== event.payload.turnId
+    ) {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.interrupt.failed",
+        summary: "Provider turn interrupt skipped",
+        detail: `Stale interrupt turn '${event.payload.turnId ?? "missing"}'; live turn is '${thread.session?.activeTurnId ?? "none"}'.`,
+        turnId: event.payload.turnId ?? null,
+        createdAt: event.payload.createdAt,
+      });
+    }
+
     // Orchestration turn ids are not provider turn ids, so interrupt by session.
-    yield* providerService.interruptTurn({ threadId: event.payload.threadId });
+    yield* checkpointReactor.registerAbortCheckpoint({
+      threadId: event.payload.threadId,
+      turnId: event.payload.turnId,
+    });
+    yield* providerService.interruptTurn({ threadId: event.payload.threadId }).pipe(
+      Effect.catchCause((cause) =>
+        checkpointReactor
+          .cancelAbortCheckpoint({
+            threadId: event.payload.threadId,
+            turnId: event.payload.turnId,
+          })
+          .pipe(
+            Effect.zipRight(
+              Effect.gen(function* () {
+                const liveThread = yield* resolveThread(event.payload.threadId);
+                if (
+                  liveThread?.session?.status !== "running" ||
+                  liveThread.session.activeTurnId !== event.payload.turnId ||
+                  liveThread.latestTurn?.turnId !== event.payload.turnId ||
+                  liveThread.latestTurn.state !== "interrupted"
+                ) {
+                  return;
+                }
+                yield* setThreadSession({
+                  threadId: event.payload.threadId,
+                  session: {
+                    ...liveThread.session,
+                    status: "running",
+                    activeTurnId: event.payload.turnId,
+                    updatedAt: event.payload.createdAt,
+                  },
+                  createdAt: event.payload.createdAt,
+                });
+              }),
+            ),
+            Effect.zipRight(Effect.failCause(cause)),
+          ),
+      ),
+    );
   });
 
   const processTurnSteerRequested = Effect.fn("processTurnSteerRequested")(function* (
@@ -1493,9 +1711,30 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processDomainEventSafely);
+  const threadWorkers = new Map<string, DrainableWorker<ProviderIntentEvent>>();
+  const getThreadWorker = Effect.fn("getThreadWorker")(function* (threadId: ThreadId) {
+    const existing = threadWorkers.get(threadId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const worker = yield* makeDrainableWorker(processDomainEventSafely);
+    threadWorkers.set(threadId, worker);
+    return worker;
+  });
+  const routeProviderIntentEvent = Effect.fn("routeProviderIntentEvent")(function* (
+    event: ProviderIntentEvent,
+  ) {
+    const worker = yield* getThreadWorker(event.payload.threadId);
+    yield* worker.enqueue(event);
+  });
+  const routerWorker = yield* makeDrainableWorker(routeProviderIntentEvent);
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
+    // Turn-start events are hot and are not replayed when this reactor starts.
+    // Remove only orphaned pending placeholders before subscribing so any new
+    // requests queued after startup retain their normal FIFO replacement semantics.
+    yield* projectionTurnRepository.deleteAllPendingTurnStarts();
+
     const interruptedTitleRegenerations = yield* findInterruptedThreadTitleRegenerations().pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
@@ -1518,7 +1757,7 @@ const make = Effect.gen(function* () {
         event.type === "thread.user-input-response-requested" ||
         event.type === "thread.session-stop-requested"
       ) {
-        return yield* worker.enqueue(event);
+        return yield* routerWorker.enqueue(event);
       }
     });
 
@@ -1553,7 +1792,8 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: Effect.gen(function* () {
-      yield* worker.drain;
+      yield* routerWorker.drain;
+      yield* Effect.forEach(threadWorkers.values(), (worker) => worker.drain, { discard: true });
       yield* threadTitleRegenerationWorker.drain;
     }),
   } satisfies ProviderCommandReactorShape;

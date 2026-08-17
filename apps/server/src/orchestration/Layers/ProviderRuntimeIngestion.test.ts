@@ -48,6 +48,7 @@ import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQu
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
+import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -244,6 +245,16 @@ describe("ProviderRuntimeIngestion", () => {
       // engine, and the snapshot query (reader).
       Layer.provideMerge(ThreadBackgroundLiveness.layer),
       Layer.provideMerge(ThreadPlanProgress.layer),
+      Layer.provideMerge(
+        Layer.succeed(CheckpointReactor, {
+          start: () => Effect.void,
+          drain: Effect.void,
+          awaitAbortCheckpoint: () => Effect.succeed(false),
+          registerAbortCheckpoint: () => Effect.void,
+          cancelAbortCheckpoint: () => Effect.void,
+          reconcileInterruptedTurn: () => Effect.void,
+        }),
+      ),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
@@ -733,6 +744,266 @@ describe("ProviderRuntimeIngestion", () => {
       (thread) => thread.session?.status === "ready" && thread.session?.activeTurnId === null,
       10_000,
     );
+  });
+
+  it("settles a matching turn.aborted as interrupted", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-aborted");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-aborted"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId,
+      payload: {},
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === turnId &&
+        thread.latestTurn?.turnId === turnId &&
+        thread.latestTurn.state === "running",
+    );
+
+    harness.emit({
+      type: "turn.aborted",
+      eventId: asEventId("evt-turn-aborted"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId,
+      turnId,
+      payload: { reason: "user requested interruption" },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "interrupted" &&
+        entry.session.activeTurnId === null &&
+        entry.latestTurn?.turnId === turnId &&
+        entry.latestTurn.state === "interrupted",
+    );
+    expect(thread.session?.status).toBe("interrupted");
+    expect(thread.session?.activeTurnId).toBeNull();
+    expect(thread.latestTurn?.state).toBe("interrupted");
+  });
+
+  it("places interruptedTurnId on accepted abort session-set commands and retains queued turn linkage", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnA = asTurnId("turn-a");
+    const turnB = asTurnId("turn-b");
+    const messageB = asMessageId("message-b");
+    const queuedAt = "2026-01-01T00:00:01.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-a-for-abort-linkage"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId: turnA,
+      payload: {},
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnA,
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-b-for-abort-linkage"),
+      threadId,
+      message: {
+        messageId: messageB,
+        role: "user",
+        text: "queued turn B",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: queuedAt,
+    });
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-a-for-abort-linkage"),
+      threadId,
+      turnId: turnA,
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.latestTurn?.turnId === turnA && thread.latestTurn.state === "interrupted",
+    );
+
+    harness.emit({
+      type: "turn.aborted",
+      eventId: asEventId("evt-turn-aborted-a-for-abort-linkage"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId: turnA,
+      payload: { reason: "user requested interruption" },
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "interrupted" && thread.session.activeTurnId === null,
+    );
+
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const sessionSetEvents = events.filter(
+      (event): event is Extract<(typeof events)[number], { type: "thread.session-set" }> =>
+        event.type === "thread.session-set",
+    );
+    const interruptedSessionSet = sessionSetEvents.find(
+      (event) => event.payload.session.status === "interrupted",
+    );
+    expect(interruptedSessionSet?.payload.interruptedTurnId).toBe(turnA);
+    expect(interruptedSessionSet?.payload.session).not.toHaveProperty("interruptedTurnId");
+    expect(
+      sessionSetEvents
+        .filter((event) => event !== interruptedSessionSet)
+        .every((event) => event.payload.interruptedTurnId === undefined),
+    ).toBe(true);
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-b-for-abort-linkage"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:04.000Z",
+      threadId,
+      turnId: turnB,
+      payload: {},
+    });
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "running" &&
+        entry.session.activeTurnId === turnB &&
+        entry.latestTurn?.turnId === turnB &&
+        entry.latestTurn.requestedAt === queuedAt,
+    );
+    expect(thread.latestTurn?.requestedAt).toBe(queuedAt);
+  });
+
+  it("ignores a mismatched turn.aborted for a different active turn", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const activeTurnId = asTurnId("turn-active");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-aborted-guard"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId: activeTurnId,
+      payload: {},
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session.activeTurnId === activeTurnId,
+    );
+
+    harness.emit({
+      type: "turn.aborted",
+      eventId: asEventId("evt-turn-aborted-stale"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId,
+      turnId: asTurnId("turn-stale"),
+      payload: { reason: "stale interruption" },
+    });
+
+    await harness.drain();
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.session?.status).toBe("running");
+    expect(thread?.session?.activeTurnId).toBe(activeTurnId);
+    expect(thread?.latestTurn?.turnId).toBe(activeTurnId);
+    expect(thread?.latestTurn?.state).toBe("running");
+  });
+
+  it("ignores turn.aborted without an active turn and retains a pending start", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const pendingTurnId = asTurnId("turn-pending-after-abort");
+    const requestedAt = "2026-01-01T00:00:01.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-pending-after-abort"),
+      threadId,
+      message: {
+        messageId: asMessageId("message-pending-after-abort"),
+        role: "user",
+        text: "start after stale abort",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: requestedAt,
+    });
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-starting-pending-after-abort"),
+      threadId,
+      session: {
+        threadId,
+        status: "starting",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:02.000Z",
+      },
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+
+    harness.emit({
+      type: "turn.aborted",
+      eventId: asEventId("evt-turn-aborted-before-pending-start"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId: asTurnId("turn-stale-before-pending-start"),
+      payload: { reason: "stale interruption" },
+    });
+
+    await harness.drain();
+    let thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.session?.status).toBe("starting");
+    expect(thread?.session?.activeTurnId).toBeNull();
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-pending-after-abort"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:04.000Z",
+      threadId,
+      turnId: pendingTurnId,
+      payload: {},
+    });
+
+    thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "running" &&
+        entry.session.activeTurnId === pendingTurnId &&
+        entry.latestTurn?.turnId === pendingTurnId &&
+        entry.latestTurn.requestedAt === requestedAt,
+    );
+    expect(thread.latestTurn?.requestedAt).toBe(requestedAt);
   });
 
   it("accepts claude turn lifecycle when seeded thread id is a synthetic placeholder", async () => {
@@ -1950,6 +2221,77 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(message?.text).toBe("buffer me");
     expect(message?.streaming).toBe(false);
+  });
+
+  it("finalizes buffered assistant and reasoning output when an active turn aborts", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-buffered-abort");
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-buffered-abort"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: {},
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-assistant-delta-buffered-abort"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-buffered-abort"),
+      payload: { streamKind: "assistant_text", delta: "partial response" },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-delta-buffered-abort"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { streamKind: "reasoning_text", delta: "partial reasoning" },
+    });
+    await harness.drain();
+
+    harness.emit({
+      type: "turn.aborted",
+      eventId: asEventId("evt-turn-aborted-buffered-output"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { reason: "user requested interruption" },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "interrupted" &&
+        entry.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-buffered-abort" &&
+            !message.streaming &&
+            message.text === "partial response",
+        ) &&
+        entry.activities.some(
+          (activity) =>
+            activity.kind === "reasoning.progress" &&
+            typeof activity.payload === "object" &&
+            activity.payload !== null &&
+            (activity.payload as { detail?: unknown }).detail === "partial reasoning",
+        ),
+    );
+    expect(thread.session?.activeTurnId).toBeNull();
   });
 
   it("flushes and completes buffered assistant text when an approval request opens", async () => {

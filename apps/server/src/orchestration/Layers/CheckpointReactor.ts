@@ -3,6 +3,7 @@ import {
   type CheckpointRef,
   EventId,
   MessageId,
+  ProviderDriverKind,
   type ProjectId,
   ThreadId,
   TurnId,
@@ -14,8 +15,10 @@ import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import type * as PlatformError from "effect/PlatformError";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
@@ -27,6 +30,8 @@ import {
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
+import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { forkParked } from "../../serverActivation.ts";
@@ -51,6 +56,11 @@ type ReactorInput =
       readonly event: OrchestrationEvent;
     };
 
+type ProviderTurnTerminalEvent = Extract<
+  ProviderRuntimeEvent,
+  { type: "turn.completed" | "turn.aborted" }
+>;
+
 function toTurnId(value: string | undefined): TurnId | null {
   return value === undefined ? null : TurnId.make(String(value));
 }
@@ -61,6 +71,8 @@ function sameId(left: string | null | undefined, right: string | null | undefine
   }
   return left === right;
 }
+
+const abortCheckpointKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 
 function checkpointStatusFromRuntime(status: string | undefined): "ready" | "missing" | "error" {
   switch (status) {
@@ -75,6 +87,12 @@ function checkpointStatusFromRuntime(status: string | undefined): "ready" | "mis
   }
 }
 
+type TerminalAbortCaptureReservation = {
+  readonly turnId: TurnId;
+  readonly checkpointTurnCount: number;
+  readonly checkpointRef: CheckpointRef;
+};
+
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const randomUUID = crypto.randomUUIDv4;
@@ -83,11 +101,151 @@ const make = Effect.gen(function* () {
     randomUUID.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerService = yield* ProviderService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
+  const abortCheckpointDeferreds = yield* Ref.make(
+    new Map<string, Deferred.Deferred<void> | "completed">(),
+  );
+  const registerAbortCheckpoint = Effect.fn("registerAbortCheckpoint")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+  }) {
+    const key = abortCheckpointKey(input.threadId, input.turnId);
+    const deferred = yield* Deferred.make<void>();
+    yield* Ref.modify(abortCheckpointDeferreds, (current) => {
+      if (current.get(key) === "completed") {
+        return [undefined, current] as const;
+      }
+      if (current.has(key)) return [undefined, current] as const;
+      const next = new Map(current);
+      next.set(key, deferred);
+      return [undefined, next] as const;
+    });
+  });
+  const completeAbortCheckpoint = Effect.fn("completeAbortCheckpoint")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly captured: boolean;
+  }) {
+    if (!input.captured) {
+      return;
+    }
+    const key = abortCheckpointKey(input.threadId, input.turnId);
+    const deferred = yield* Ref.modify(abortCheckpointDeferreds, (current) => {
+      const next = new Map(current);
+      const value = next.get(key);
+      // Capture can finish before ProviderRuntimeIngestion registers its
+      // abort gate. Keep completion evidence in that ordering window so the
+      // late registration remains consumable instead of creating a deferred
+      // that can never be resolved.
+      next.set(key, "completed");
+      return [value, next] as const;
+    });
+    if (deferred !== undefined && deferred !== "completed") {
+      yield* Deferred.succeed(deferred, undefined);
+    }
+  });
+  const awaitAbortCheckpoint = (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
+    Ref.modify(abortCheckpointDeferreds, (current) => {
+      const key = abortCheckpointKey(input.threadId, input.turnId);
+      const deferred = current.get(key);
+      if (deferred === undefined)
+        return [{ deferred: undefined, observed: false }, current] as const;
+      if (deferred !== "completed") return [{ deferred, observed: true }, current] as const;
+      const next = new Map(current);
+      next.delete(key);
+      return [{ deferred: undefined, observed: true }, next] as const;
+    }).pipe(
+      Effect.flatMap(({ deferred, observed }) => {
+        return deferred === undefined
+          ? Effect.succeed(observed)
+          : Deferred.await(deferred).pipe(
+              Effect.flatMap(() =>
+                Ref.modify(abortCheckpointDeferreds, (current) => {
+                  const key = abortCheckpointKey(input.threadId, input.turnId);
+                  if (current.get(key) !== "completed") {
+                    return [undefined, current] as const;
+                  }
+                  const next = new Map(current);
+                  next.delete(key);
+                  return [undefined, next] as const;
+                }).pipe(Effect.as(true)),
+              ),
+            );
+      }),
+    );
+  const cancelAbortCheckpoint = (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
+    Ref.modify(abortCheckpointDeferreds, (current) => {
+      const key = abortCheckpointKey(input.threadId, input.turnId);
+      const deferred = current.get(key);
+      const next = new Map(current);
+      next.delete(key);
+      return [deferred, next] as const;
+    }).pipe(
+      Effect.flatMap((deferred) =>
+        deferred === undefined || deferred === "completed"
+          ? Effect.void
+          : Deferred.succeed(deferred, undefined).pipe(Effect.asVoid),
+      ),
+    );
+  const reconcileInterruptedTurn = Effect.fn("reconcileInterruptedTurn")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+  }) {
+    const thread = yield* resolveThreadDetail(input.threadId);
+    if (
+      !thread ||
+      thread.session?.status !== "interrupted" ||
+      thread.latestTurn?.turnId !== input.turnId ||
+      thread.latestTurn.state !== "interrupted"
+    ) {
+      return;
+    }
+    const hasReadyCheckpoint = thread.checkpoints.some(
+      (checkpoint) => checkpoint.turnId === input.turnId && checkpoint.status === "ready",
+    );
+    const interruptedTurn = yield* projectionTurnRepository.getByTurnId({
+      threadId: input.threadId,
+      turnId: input.turnId,
+    });
+    const abortGate = (yield* Ref.get(abortCheckpointDeferreds)).get(
+      abortCheckpointKey(input.threadId, input.turnId),
+    );
+    const hasOutstandingAbortGate = abortGate !== undefined && abortGate !== "completed";
+    if (
+      hasReadyCheckpoint &&
+      !hasOutstandingAbortGate &&
+      Option.isSome(interruptedTurn) &&
+      interruptedTurn.value.isTerminalAbortCheckpoint
+    ) {
+      return;
+    }
+
+    // A ref can survive a crash without the terminal projection event. That
+    // ref is not completion evidence: it may be the ready mid-turn snapshot
+    // that caused the ambiguity in the first place. Reconciliation must let
+    // the terminal capture path persist (or reuse) its reservation instead.
+    yield* registerAbortCheckpoint(input);
+    const event: Extract<ProviderRuntimeEvent, { type: "turn.aborted" }> = {
+      type: "turn.aborted",
+      eventId: yield* serverEventId,
+      provider: ProviderDriverKind.make(thread.session?.providerName ?? "codex"),
+      threadId: input.threadId,
+      turnId: input.turnId,
+      createdAt: yield* nowIso,
+      payload: { reason: "Recovered interrupted turn checkpoint" },
+    };
+    const captured = yield* captureCheckpointFromTurnTerminal(event);
+    yield* completeAbortCheckpoint({
+      threadId: input.threadId,
+      turnId: input.turnId,
+      captured: captured === true,
+    });
+  });
 
   const appendRevertFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -215,6 +373,69 @@ const make = Effect.gen(function* () {
     return cwd;
   });
 
+  // Reserve the exact terminal-abort checkpoint identity in the event log
+  // before touching Git. A `missing` checkpoint carrying the terminal marker
+  // is an intent, not a completed capture; the final `ready` event below is
+  // what turns that reservation into completion evidence. A persisted
+  // reservation is the only source allowed to override the deterministic
+  // thread/turn ref; provider-diff refs are mid-turn placeholders and must
+  // never be treated as terminal identity.
+  const reserveTerminalAbortCapture = Effect.fn("reserveTerminalAbortCapture")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly thread: {
+      readonly checkpoints: ReadonlyArray<{
+        readonly turnId: TurnId;
+        readonly checkpointTurnCount: number;
+        readonly checkpointRef: CheckpointRef;
+        readonly status: "ready" | "missing" | "error";
+        readonly assistantMessageId: MessageId | null;
+      }>;
+    };
+    readonly existingReservation?: TerminalAbortCaptureReservation;
+    readonly createdAt: string;
+  }): Effect.fn.Return<TerminalAbortCaptureReservation> {
+    if (input.existingReservation !== undefined) {
+      return input.existingReservation;
+    }
+
+    const existingCheckpoint = input.thread.checkpoints.find(
+      (checkpoint) => checkpoint.turnId === input.turnId,
+    );
+    const currentTurnCount = input.thread.checkpoints.reduce(
+      (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
+      0,
+    );
+    const checkpointTurnCount =
+      input.existingReservation?.checkpointTurnCount ??
+      existingCheckpoint?.checkpointTurnCount ??
+      currentTurnCount + 1;
+    const checkpointRef =
+      input.existingReservation?.checkpointRef ??
+      checkpointRefForThreadTurn(input.threadId, checkpointTurnCount);
+
+    yield* orchestrationEngine.dispatch({
+      type: "thread.turn.diff.complete",
+      commandId: yield* serverCommandId("checkpoint-terminal-abort-reserve"),
+      threadId: input.threadId,
+      turnId: input.turnId,
+      completedAt: input.createdAt,
+      checkpointRef,
+      status: "missing",
+      files: [],
+      assistantMessageId: existingCheckpoint?.assistantMessageId ?? undefined,
+      isTerminalAbort: true,
+      checkpointTurnCount,
+      createdAt: input.createdAt,
+    });
+
+    return {
+      turnId: input.turnId,
+      checkpointTurnCount,
+      checkpointRef,
+    };
+  });
+
   // Shared tail for both capture paths: creates the git checkpoint ref, diffs
   // it against the previous turn, then dispatches the domain events to update
   // the orchestration read model.
@@ -230,13 +451,22 @@ const make = Effect.gen(function* () {
     };
     readonly cwd: string;
     readonly turnCount: number;
+    readonly checkpointRef?: CheckpointRef;
+    /**
+     * The terminal-abort reservation was persisted before the process
+     * restarted and its ref is already durable. Finalize the projection from
+     * that ref without overwriting it with the current worktree contents.
+     */
+    readonly checkpointAlreadyMaterialized?: boolean;
     readonly status: "ready" | "missing" | "error";
+    readonly isTerminalAbort?: boolean;
     readonly assistantMessageId: MessageId | undefined;
     readonly createdAt: string;
   }) {
     const fromTurnCount = Math.max(0, input.turnCount - 1);
     const fromCheckpointRef = checkpointRefForThreadTurn(input.threadId, fromTurnCount);
-    const targetCheckpointRef = checkpointRefForThreadTurn(input.threadId, input.turnCount);
+    const targetCheckpointRef =
+      input.checkpointRef ?? checkpointRefForThreadTurn(input.threadId, input.turnCount);
 
     const fromCheckpointExists = yield* checkpointStore.hasCheckpointRef({
       cwd: input.cwd,
@@ -250,10 +480,12 @@ const make = Effect.gen(function* () {
       });
     }
 
-    yield* checkpointStore.captureCheckpoint({
-      cwd: input.cwd,
-      checkpointRef: targetCheckpointRef,
-    });
+    if (!input.checkpointAlreadyMaterialized) {
+      yield* checkpointStore.captureCheckpoint({
+        cwd: input.cwd,
+        checkpointRef: targetCheckpointRef,
+      });
+    }
 
     // Refresh the workspace entry index so the @-mention file picker
     // reflects files created or deleted during this turn.
@@ -311,6 +543,7 @@ const make = Effect.gen(function* () {
       status: input.status,
       files,
       assistantMessageId,
+      isTerminalAbort: input.isTerminalAbort === true,
       checkpointTurnCount: input.turnCount,
       createdAt: input.createdAt,
     });
@@ -351,9 +584,9 @@ const make = Effect.gen(function* () {
     });
   });
 
-  // Captures a real git checkpoint when a turn completes via a runtime event.
-  const captureCheckpointFromTurnCompletion = Effect.fn("captureCheckpointFromTurnCompletion")(
-    function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>) {
+  // Captures a real git checkpoint when a provider reports a terminal turn event.
+  const captureCheckpointFromTurnTerminal = Effect.fn("captureCheckpointFromTurnTerminal")(
+    function* (event: ProviderTurnTerminalEvent) {
       const turnId = toTurnId(event.turnId);
       if (!turnId) {
         return;
@@ -364,18 +597,43 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      // When a primary turn is active, only that turn may produce completion checkpoints.
-      if (thread.session?.activeTurnId && !sameId(thread.session.activeTurnId, turnId)) {
-        return;
+      if (event.type === "turn.aborted") {
+        const abortGate = (yield* Ref.get(abortCheckpointDeferreds)).get(
+          abortCheckpointKey(thread.id, turnId),
+        );
+        // A ready checkpoint is durable evidence that terminal capture already
+        // completed; unlike the in-memory abort gate, it survives restarts.
+        const hasReadyCheckpoint = thread.checkpoints.some(
+          (checkpoint) => checkpoint.turnId === turnId && checkpoint.status === "ready",
+        );
+        const hasOutstandingAbortGate = abortGate !== undefined && abortGate !== "completed";
+        const interruptedTurn = yield* projectionTurnRepository.getByTurnId({
+          threadId: thread.id,
+          turnId,
+        });
+        const hasTerminalAbortCapture =
+          Option.isSome(interruptedTurn) && interruptedTurn.value.isTerminalAbortCheckpoint;
+        if (hasReadyCheckpoint && !hasOutstandingAbortGate && hasTerminalAbortCapture) {
+          return;
+        }
+        const abortMatchesActiveTurn =
+          thread.session?.status === "running" && sameId(thread.session.activeTurnId, turnId);
+        const abortFollowsAcceptedAbort =
+          Option.isSome(interruptedTurn) &&
+          interruptedTurn.value.state === "interrupted" &&
+          abortGate !== undefined;
+        if (!abortMatchesActiveTurn && !abortFollowsAcceptedAbort) {
+          return;
+        }
       }
 
-      // Only skip if a real (non-placeholder) checkpoint already exists for this turn.
-      // ProviderRuntimeIngestion may insert placeholder entries with status "missing"
-      // before this reactor runs; those must not prevent real git capture.
+      // Completion events must match the active turn. Accepted aborts may be
+      // queued behind a new turn, so their durable interrupted turn row is
+      // the authoritative ownership proof instead.
       if (
-        thread.checkpoints.some(
-          (checkpoint) => checkpoint.turnId === turnId && checkpoint.status !== "missing",
-        )
+        event.type !== "turn.aborted" &&
+        thread.session?.activeTurnId &&
+        !sameId(thread.session.activeTurnId, turnId)
       ) {
         return;
       }
@@ -388,20 +646,88 @@ const make = Effect.gen(function* () {
         preferSessionRuntime: true,
       });
       if (!checkpointCwd) {
+        // An accepted abort still settles the provider's abort gate even when
+        // the workspace cannot be checkpointed (missing CWD or non-Git CWD).
+        // Normal completion must keep its gate pending unless it has durable
+        // checkpoint evidence, handled below.
+        return event.type === "turn.aborted" ? true : undefined;
+      }
+
+      // ProviderRuntimeIngestion may insert placeholder checkpoints with
+      // status "missing" before this reactor runs; those must not prevent real
+      // git capture. A ready checkpoint can be reused only when its ref is
+      // still durable, which also settles a matching abort gate.
+      const existingCheckpoint = thread.checkpoints.find(
+        (checkpoint) => checkpoint.turnId === turnId,
+      );
+      if (
+        event.type !== "turn.aborted" &&
+        existingCheckpoint !== undefined &&
+        existingCheckpoint.status !== "missing"
+      ) {
+        if (existingCheckpoint.status !== "ready") {
+          return;
+        }
+        if (
+          yield* checkpointStore.hasCheckpointRef({
+            cwd: checkpointCwd,
+            checkpointRef: existingCheckpoint.checkpointRef,
+          })
+        ) {
+          return true;
+        }
         return;
       }
 
+      const persistedTerminalAbortReservation =
+        event.type === "turn.aborted"
+          ? yield* projectionTurnRepository.getByTurnId({ threadId: thread.id, turnId }).pipe(
+              Effect.map((projectedTurn) =>
+                Option.isNone(projectedTurn) ||
+                !projectedTurn.value.isTerminalAbortCheckpoint ||
+                projectedTurn.value.checkpointStatus !== "missing" ||
+                projectedTurn.value.checkpointTurnCount === null ||
+                projectedTurn.value.checkpointRef === null
+                  ? undefined
+                  : {
+                      turnId,
+                      checkpointTurnCount: projectedTurn.value.checkpointTurnCount,
+                      checkpointRef: projectedTurn.value.checkpointRef,
+                    },
+              ),
+            )
+          : undefined;
+
+      const terminalAbortReservation =
+        event.type === "turn.aborted"
+          ? yield* reserveTerminalAbortCapture({
+              threadId: thread.id,
+              turnId,
+              thread,
+              existingReservation: persistedTerminalAbortReservation,
+              createdAt: event.createdAt,
+            })
+          : undefined;
+
+      // A persisted terminal reservation followed by a durable ref means the
+      // capture completed before the projection finalization was lost. Reuse
+      // that ref and finalize the projection; recapturing would overwrite the
+      // reserved terminal state with unrelated post-crash worktree edits.
+      const checkpointAlreadyMaterialized =
+        persistedTerminalAbortReservation !== undefined &&
+        (yield* checkpointStore.hasCheckpointRef({
+          cwd: checkpointCwd,
+          checkpointRef: persistedTerminalAbortReservation.checkpointRef,
+        }));
+
       // If a placeholder checkpoint exists for this turn, reuse its turn count
       // instead of incrementing past it.
-      const existingPlaceholder = thread.checkpoints.find(
-        (checkpoint) => checkpoint.turnId === turnId && checkpoint.status === "missing",
-      );
       const currentTurnCount = thread.checkpoints.reduce(
         (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
         0,
       );
-      const nextTurnCount = existingPlaceholder
-        ? existingPlaceholder.checkpointTurnCount
+      const nextTurnCount = existingCheckpoint
+        ? existingCheckpoint.checkpointTurnCount
         : currentTurnCount + 1;
 
       yield* captureAndDispatchCheckpoint({
@@ -409,11 +735,17 @@ const make = Effect.gen(function* () {
         turnId,
         thread,
         cwd: checkpointCwd,
-        turnCount: nextTurnCount,
-        status: checkpointStatusFromRuntime(event.payload.state),
+        turnCount: terminalAbortReservation?.checkpointTurnCount ?? nextTurnCount,
+        checkpointRef: terminalAbortReservation?.checkpointRef,
+        checkpointAlreadyMaterialized,
+        status: checkpointStatusFromRuntime(
+          event.type === "turn.aborted" ? "completed" : event.payload.state,
+        ),
+        isTerminalAbort: event.type === "turn.aborted",
         assistantMessageId: undefined,
         createdAt: event.createdAt,
       });
+      return true;
     },
   );
 
@@ -430,8 +762,10 @@ const make = Effect.gen(function* () {
   ) {
     const { threadId, turnId, checkpointTurnCount, status } = event.payload;
 
-    // Only replace placeholders; skip events from our own real captures.
-    if (status !== "missing") {
+    // Only provider diff placeholders have synthetic refs. A terminal abort
+    // deliberately records a real git ref with missing status so its turn
+    // stays interrupted; never recapture that event as ready.
+    if (status !== "missing" || !String(event.payload.checkpointRef).startsWith("provider-diff:")) {
       return;
     }
 
@@ -453,6 +787,17 @@ const make = Effect.gen(function* () {
         "checkpoint capture from placeholder skipped: real checkpoint already exists",
         { threadId, turnId },
       );
+      return;
+    }
+
+    // A terminal-abort reservation owns this turn's canonical ref. A later
+    // provider diff placeholder must not overwrite that intent or turn it
+    // into a mid-turn capture while the terminal reactor is recovering.
+    const projectedTurn = yield* projectionTurnRepository.getByTurnId({
+      threadId,
+      turnId,
+    });
+    if (Option.isSome(projectedTurn) && projectedTurn.value.isTerminalAbortCheckpoint) {
       return;
     }
 
@@ -529,32 +874,32 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const refreshLocalGitStatusFromTurnCompletion = Effect.fn(
-    "refreshLocalGitStatusFromTurnCompletion",
-  )(function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>) {
-    const sessionRuntime = yield* resolveSessionRuntimeForThread(event.threadId);
-    if (Option.isNone(sessionRuntime)) {
-      return;
-    }
+  const refreshLocalGitStatusFromTurnTerminal = Effect.fn("refreshLocalGitStatusFromTurnTerminal")(
+    function* (event: ProviderTurnTerminalEvent) {
+      const sessionRuntime = yield* resolveSessionRuntimeForThread(event.threadId);
+      if (Option.isNone(sessionRuntime)) {
+        return;
+      }
 
-    const local = yield* vcsStatusBroadcaster.refreshLocalStatus(sessionRuntime.value.cwd).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("failed to refresh local git status after turn completion", {
+      const local = yield* vcsStatusBroadcaster.refreshLocalStatus(sessionRuntime.value.cwd).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to refresh local git status after turn completion", {
+            threadId: event.threadId,
+            turnId: event.turnId ?? null,
+            cwd: sessionRuntime.value.cwd,
+            detail: error.message,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+      if (local !== null) {
+        yield* followWorktreeBranchDrift({
           threadId: event.threadId,
-          turnId: event.turnId ?? null,
           cwd: sessionRuntime.value.cwd,
-          detail: error.message,
-        }).pipe(Effect.as(null)),
-      ),
-    );
-    if (local !== null) {
-      yield* followWorktreeBranchDrift({
-        threadId: event.threadId,
-        cwd: sessionRuntime.value.cwd,
-        local,
-      });
-    }
-  });
+          local,
+        });
+      }
+    },
+  );
 
   // A `git checkout` run inside a thread's dedicated worktree (by an agent or
   // the user) bypasses T3's commands, so the thread's recorded branch goes
@@ -863,26 +1208,71 @@ const make = Effect.gen(function* () {
   const processRuntimeEvent = Effect.fn("processRuntimeEvent")(function* (
     event: ProviderRuntimeEvent,
   ) {
+    if (
+      event.type === "turn.completed" &&
+      (event.payload.state === "cancelled" || event.payload.state === "interrupted")
+    ) {
+      return yield* processRuntimeEvent({
+        ...event,
+        type: "turn.aborted",
+        payload: { reason: event.payload.stopReason ?? "Provider turn cancelled" },
+      });
+    }
     if (event.type === "turn.started") {
       yield* ensurePreTurnBaselineFromTurnStart(event);
       return;
     }
 
-    if (event.type === "turn.completed") {
+    if (event.type === "turn.completed" || event.type === "turn.aborted") {
       const turnId = toTurnId(event.turnId);
-      yield* refreshLocalGitStatusFromTurnCompletion(event);
-      yield* captureCheckpointFromTurnCompletion(event).pipe(
-        Effect.catch((error) =>
-          Effect.flatMap(nowIso, (createdAt) =>
-            appendCaptureFailureActivity({
-              threadId: event.threadId,
-              turnId,
-              detail: error.message,
-              createdAt,
-            }).pipe(Effect.catch(() => Effect.void)),
+      if (event.type === "turn.aborted" && turnId) {
+        const capturedRef = yield* Ref.make(false);
+        yield* Effect.gen(function* () {
+          yield* refreshLocalGitStatusFromTurnTerminal(event);
+          const captured = yield* captureCheckpointFromTurnTerminal(event).pipe(
+            Effect.catch((error) =>
+              Effect.flatMap(nowIso, (createdAt) =>
+                appendCaptureFailureActivity({
+                  threadId: event.threadId,
+                  turnId,
+                  detail: error.message,
+                  createdAt,
+                }).pipe(Effect.catch(() => Effect.void)),
+              ).pipe(Effect.as(false)),
+            ),
+          );
+          yield* Ref.set(capturedRef, captured === true);
+        }).pipe(
+          Effect.ensuring(
+            Ref.get(capturedRef).pipe(
+              Effect.flatMap((captured) =>
+                completeAbortCheckpoint({
+                  threadId: event.threadId,
+                  turnId,
+                  captured,
+                }),
+              ),
+            ),
           ),
-        ),
-      );
+        );
+      } else {
+        yield* refreshLocalGitStatusFromTurnTerminal(event);
+        const captured = yield* captureCheckpointFromTurnTerminal(event).pipe(
+          Effect.catch((error) =>
+            Effect.flatMap(nowIso, (createdAt) =>
+              appendCaptureFailureActivity({
+                threadId: event.threadId,
+                turnId,
+                detail: error.message,
+                createdAt,
+              }).pipe(Effect.catch(() => Effect.void)),
+            ).pipe(Effect.as(false)),
+          ),
+        );
+        if (turnId && captured === true) {
+          yield* cancelAbortCheckpoint({ threadId: event.threadId, turnId });
+        }
+      }
       return;
     }
   });
@@ -929,7 +1319,11 @@ const make = Effect.gen(function* () {
 
     yield* forkParked(
       Stream.runForEach(providerService.streamEvents, (event) => {
-        if (event.type !== "turn.started" && event.type !== "turn.completed") {
+        if (
+          event.type !== "turn.started" &&
+          event.type !== "turn.completed" &&
+          event.type !== "turn.aborted"
+        ) {
           return Effect.void;
         }
         return worker.enqueue({ source: "runtime", event });
@@ -940,7 +1334,13 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: worker.drain,
+    awaitAbortCheckpoint,
+    registerAbortCheckpoint,
+    cancelAbortCheckpoint,
+    reconcileInterruptedTurn,
   } satisfies CheckpointReactorShape;
 });
 
-export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make);
+export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make).pipe(
+  Layer.provide(ProjectionTurnRepositoryLive),
+);
