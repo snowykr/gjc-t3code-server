@@ -41,7 +41,7 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
-import { RuntimeReceiptBusLive } from "./RuntimeReceiptBus.ts";
+import { RuntimeReceiptBusTest } from "./RuntimeReceiptBus.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -51,6 +51,10 @@ import {
 } from "../Services/OrchestrationEngine.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  RuntimeReceiptBus,
+  type OrchestrationRuntimeReceipt,
+} from "../Services/RuntimeReceiptBus.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -199,6 +203,26 @@ async function waitForEvent(
   return poll();
 }
 
+async function waitForReceipt(
+  receipts: ReadonlyArray<OrchestrationRuntimeReceipt>,
+  predicate: (receipt: OrchestrationRuntimeReceipt) => boolean,
+  timeoutMs = 15_000,
+) {
+  const deadline = (await Effect.runPromise(Clock.currentTimeMillis)) + timeoutMs;
+  const poll = async (): Promise<OrchestrationRuntimeReceipt> => {
+    const receipt = receipts.find(predicate);
+    if (receipt) {
+      return receipt;
+    }
+    if ((await Effect.runPromise(Clock.currentTimeMillis)) >= deadline) {
+      throw new Error("Timed out waiting for checkpoint receipt.");
+    }
+    await Effect.runPromise(Effect.sleep("10 millis"));
+    return poll();
+  };
+  return poll();
+}
+
 function runGit(cwd: string, args: ReadonlyArray<string>) {
   return NodeChildProcess.execFileSync("git", args, {
     cwd,
@@ -251,7 +275,8 @@ describe("CheckpointReactor", () => {
     | OrchestrationEngineService
     | CheckpointReactor
     | CheckpointStore.CheckpointStore
-    | ProjectionSnapshotQuery,
+    | ProjectionSnapshotQuery
+    | RuntimeReceiptBus,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -337,7 +362,7 @@ describe("CheckpointReactor", () => {
     const layer = CheckpointReactorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
-      Layer.provideMerge(RuntimeReceiptBusLive),
+      Layer.provideMerge(RuntimeReceiptBusTest),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
       Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))),
@@ -357,10 +382,19 @@ describe("CheckpointReactor", () => {
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(CheckpointReactor));
+    const receiptBus = await runtime.runPromise(Effect.service(RuntimeReceiptBus));
     const checkpointStore = await runtime.runPromise(
       Effect.service(CheckpointStore.CheckpointStore),
     );
     scope = await Effect.runPromise(Scope.make("sequential"));
+    const receipts: OrchestrationRuntimeReceipt[] = [];
+    await runtime.runPromise(
+      Stream.runForEach(receiptBus.streamEventsForTest, (receipt) =>
+        Effect.sync(() => {
+          receipts.push(receipt);
+        }),
+      ).pipe(Effect.forkScoped, Scope.provide(scope)),
+    );
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(reactor.drain);
 
@@ -450,6 +484,7 @@ describe("CheckpointReactor", () => {
       provider,
       cwd,
       drain,
+      receipts,
     };
   }
 
@@ -590,7 +625,20 @@ describe("CheckpointReactor", () => {
       payload: { reason: "user requested interruption" },
     });
 
-    await waitForEvent(harness.engine, (event) => event.type === "thread.turn-diff-completed");
+    await waitForReceipt(
+      harness.receipts,
+      (receipt) =>
+        receipt.type === "checkpoint.diff.finalized" &&
+        receipt.turnId === turnId &&
+        receipt.status === "missing",
+    );
+    await waitForReceipt(
+      harness.receipts,
+      (receipt) => receipt.type === "turn.processing.quiesced" && receipt.turnId === turnId,
+    );
+    await harness.drain();
+    await Effect.runPromise(Effect.yieldNow);
+    await harness.drain();
     const thread = await waitForThread(harness.readModel, (entry) =>
       entry.checkpoints.some(
         (checkpoint) =>
@@ -605,6 +653,16 @@ describe("CheckpointReactor", () => {
     ).toBe("aborted work\n");
     expect(thread.checkpoints).toHaveLength(1);
     expect(thread.latestTurn?.state).toBe("interrupted");
+    expect(
+      harness.receipts.filter(
+        (receipt) => receipt.type === "checkpoint.diff.finalized" && receipt.turnId === turnId,
+      ),
+    ).toHaveLength(1);
+    expect(
+      harness.receipts.filter(
+        (receipt) => receipt.type === "turn.processing.quiesced" && receipt.turnId === turnId,
+      ),
+    ).toHaveLength(1);
   });
 
   it("does not checkpoint a stale abort without a matching active or interrupted turn", async () => {

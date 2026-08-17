@@ -460,8 +460,10 @@ const make = Effect.gen(function* () {
   ) {
     const { threadId, turnId, checkpointTurnCount, status } = event.payload;
 
-    // Only replace placeholders; skip events from our own real captures.
-    if (status !== "missing") {
+    // Only provider diff placeholders have synthetic refs. A terminal abort
+    // deliberately records a real git ref with missing status so its turn
+    // stays interrupted; never recapture that event as ready.
+    if (status !== "missing" || !String(event.payload.checkpointRef).startsWith("provider-diff:")) {
       return;
     }
 
