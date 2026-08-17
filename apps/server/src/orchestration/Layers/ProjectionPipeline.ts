@@ -1167,12 +1167,22 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             const existingTurns = yield* projectionTurnRepository.listByThreadId({
               threadId: event.payload.threadId,
             });
-            // A null active turn identifies an interrupted startup, so a
-            // historical interrupted row must not keep its pending start.
+            const existingThread = yield* projectionThreadRepository.getById({
+              threadId: event.payload.threadId,
+            });
+            const latestTurnId = Option.isSome(existingThread)
+              ? existingThread.value.latestTurnId
+              : null;
+            // An interrupted session clears activeTurnId, while the thread
+            // projection retains the latest concrete turn. Use that durable
+            // association so historical interrupted rows do not keep a
+            // startup-only pending start alive.
             const hasInterruptedCurrentTurn =
               event.payload.session.status === "interrupted" &&
-              turnId !== null &&
-              existingTurns.some((turn) => turn.turnId === turnId);
+              latestTurnId !== null &&
+              existingTurns.some(
+                (turn) => turn.turnId === latestTurnId && turn.state === "interrupted",
+              );
             if (
               event.payload.session.status === "error" ||
               event.payload.session.status === "stopped" ||

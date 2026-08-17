@@ -2539,12 +2539,15 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
       }),
     );
 
-    it.effect("scopes interrupted pending-start retention to the current session turn", () =>
+    it.effect("retains queued starts only for an interrupted latest turn", () =>
       Effect.gen(function* () {
         const projectionPipeline = yield* OrchestrationProjectionPipeline;
         const eventStore = yield* OrchestrationEventStore;
         const sql = yield* SqlClient.SqlClient;
-        const append = (event: Parameters<typeof eventStore.append>[0]) => eventStore.append(event);
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
 
         const historicalThreadId = ThreadId.make("thread-interrupted-history");
         const historicalTurnId = TurnId.make("turn-interrupted-history");
@@ -2552,7 +2555,32 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
         const historicalAt = "2026-02-26T14:10:00.000Z";
         const historicalPendingAt = "2026-02-26T14:10:01.000Z";
 
-        yield* append({
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-interrupted-history-created"),
+          aggregateKind: "thread",
+          aggregateId: historicalThreadId,
+          occurredAt: "2026-02-26T14:09:59.000Z",
+          commandId: CommandId.make("cmd-interrupted-history-created"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupted-history-created"),
+          metadata: {},
+          payload: {
+            threadId: historicalThreadId,
+            projectId: ProjectId.make("project-interrupted-history"),
+            title: "Interrupted history",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "codex-mini",
+            },
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-02-26T14:09:59.000Z",
+            updatedAt: "2026-02-26T14:09:59.000Z",
+          },
+        });
+        yield* appendAndProject({
           type: "thread.turn-interrupt-requested",
           eventId: EventId.make("evt-interrupted-history-turn"),
           aggregateKind: "thread",
@@ -2568,7 +2596,7 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
             createdAt: historicalAt,
           },
         });
-        yield* append({
+        yield* appendAndProject({
           type: "thread.turn-start-requested",
           eventId: EventId.make("evt-interrupted-history-pending"),
           aggregateKind: "thread",
@@ -2585,7 +2613,7 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
             createdAt: historicalPendingAt,
           },
         });
-        yield* append({
+        yield* appendAndProject({
           type: "thread.session-set",
           eventId: EventId.make("evt-interrupted-history-session"),
           aggregateKind: "thread",
@@ -2615,23 +2643,55 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
         const currentAt = "2026-02-26T14:20:00.000Z";
         const currentPendingAt = "2026-02-26T14:20:01.000Z";
 
-        yield* append({
-          type: "thread.turn-interrupt-requested",
-          eventId: EventId.make("evt-interrupted-current-turn"),
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-interrupted-current-created"),
           aggregateKind: "thread",
           aggregateId: currentThreadId,
-          occurredAt: currentAt,
-          commandId: CommandId.make("cmd-interrupted-current-turn"),
+          occurredAt: "2026-02-26T14:19:59.000Z",
+          commandId: CommandId.make("cmd-interrupted-current-created"),
           causationEventId: null,
-          correlationId: CommandId.make("cmd-interrupted-current-turn"),
+          correlationId: CommandId.make("cmd-interrupted-current-created"),
           metadata: {},
           payload: {
             threadId: currentThreadId,
-            turnId: currentTurnId,
-            createdAt: currentAt,
+            projectId: ProjectId.make("project-interrupted-current"),
+            title: "Interrupted current",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "codex-mini",
+            },
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-02-26T14:19:59.000Z",
+            updatedAt: "2026-02-26T14:19:59.000Z",
           },
         });
-        yield* append({
+        yield* appendAndProject({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-interrupted-current-session-start"),
+          aggregateKind: "thread",
+          aggregateId: currentThreadId,
+          occurredAt: currentAt,
+          commandId: CommandId.make("cmd-interrupted-current-session-start"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupted-current-session-start"),
+          metadata: {},
+          payload: {
+            threadId: currentThreadId,
+            session: {
+              threadId: currentThreadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: currentTurnId,
+              lastError: null,
+              updatedAt: currentAt,
+            },
+          },
+        });
+        yield* appendAndProject({
           type: "thread.turn-start-requested",
           eventId: EventId.make("evt-interrupted-current-pending"),
           aggregateKind: "thread",
@@ -2648,7 +2708,23 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
             createdAt: currentPendingAt,
           },
         });
-        yield* append({
+        yield* appendAndProject({
+          type: "thread.turn-interrupt-requested",
+          eventId: EventId.make("evt-interrupted-current-turn"),
+          aggregateKind: "thread",
+          aggregateId: currentThreadId,
+          occurredAt: "2026-02-26T14:20:02.000Z",
+          commandId: CommandId.make("cmd-interrupted-current-turn"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupted-current-turn"),
+          metadata: {},
+          payload: {
+            threadId: currentThreadId,
+            turnId: currentTurnId,
+            createdAt: "2026-02-26T14:20:02.000Z",
+          },
+        });
+        yield* appendAndProject({
           type: "thread.session-set",
           eventId: EventId.make("evt-interrupted-current-session"),
           aggregateKind: "thread",
@@ -2665,14 +2741,12 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
               status: "interrupted",
               providerName: "codex",
               runtimeMode: "approval-required",
-              activeTurnId: currentTurnId,
+              activeTurnId: null,
               lastError: null,
-              updatedAt: "2026-02-26T14:20:02.000Z",
+              updatedAt: "2026-02-26T14:20:03.000Z",
             },
           },
         });
-
-        yield* projectionPipeline.bootstrap;
 
         const pendingRows = yield* sql<{
           readonly threadId: string;
