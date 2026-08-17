@@ -483,6 +483,8 @@ describe("CheckpointReactor", () => {
       cwd,
       drain,
       receipts,
+      registerAbortCheckpoint: (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
+        runtime!.runPromise(reactor.registerAbortCheckpoint(input)),
     };
   }
 
@@ -613,6 +615,7 @@ describe("CheckpointReactor", () => {
         createdAt: "2026-01-01T00:00:01.000Z",
       }),
     );
+    await harness.registerAbortCheckpoint({ threadId, turnId });
     harness.provider.emit({
       type: "turn.aborted",
       eventId: EventId.make("evt-turn-aborted-checkpoint"),
@@ -734,6 +737,7 @@ describe("CheckpointReactor", () => {
         createdAt: "2026-01-01T00:00:01.000Z",
       }),
     );
+    await harness.registerAbortCheckpoint({ threadId, turnId: abortedTurnId });
     harness.provider.emit({
       type: "turn.aborted",
       eventId: EventId.make("evt-turn-aborted-before-next-turn"),

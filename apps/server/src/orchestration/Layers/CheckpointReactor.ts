@@ -429,9 +429,11 @@ const make = Effect.gen(function* () {
           threadId: thread.id,
           turnId,
         });
-        const abortFollowsInterruptedTurn =
-          Option.isSome(interruptedTurn) && interruptedTurn.value.state === "interrupted";
-        if (!abortMatchesActiveTurn && !abortFollowsInterruptedTurn) {
+        const abortFollowsAcceptedAbort =
+          Option.isSome(interruptedTurn) &&
+          interruptedTurn.value.state === "interrupted" &&
+          (yield* Ref.get(abortCheckpointDeferreds)).has(abortCheckpointKey(thread.id, turnId));
+        if (!abortMatchesActiveTurn && !abortFollowsAcceptedAbort) {
           return;
         }
       }
@@ -955,7 +957,16 @@ const make = Effect.gen(function* () {
       const turnId = toTurnId(event.turnId);
       if (event.type === "turn.aborted" && turnId) {
         const capturedRef = yield* Ref.make(false);
+        const acceptedAbortRef = yield* Ref.make(false);
         yield* Effect.gen(function* () {
+          const thread = yield* resolveThreadDetail(event.threadId);
+          const acceptedAbort =
+            thread?.session?.status === "running" && sameId(thread.session.activeTurnId, turnId)
+              ? true
+              : (yield* Ref.get(abortCheckpointDeferreds)).has(
+                  abortCheckpointKey(event.threadId, turnId),
+                );
+          yield* Ref.set(acceptedAbortRef, acceptedAbort);
           yield* refreshLocalGitStatusFromTurnTerminal(event);
           const captured = yield* captureCheckpointFromTurnTerminal(event).pipe(
             Effect.catch((error) =>
@@ -973,12 +984,16 @@ const make = Effect.gen(function* () {
         }).pipe(
           Effect.ensuring(
             Ref.get(capturedRef).pipe(
-              Effect.flatMap((preserveCompletion) =>
-                completeAbortCheckpoint({
-                  threadId: event.threadId,
-                  turnId,
-                  preserveCompletion,
-                }),
+              Effect.flatMap((captured) =>
+                Ref.get(acceptedAbortRef).pipe(
+                  Effect.flatMap((accepted) =>
+                    completeAbortCheckpoint({
+                      threadId: event.threadId,
+                      turnId,
+                      preserveCompletion: captured || accepted,
+                    }),
+                  ),
+                ),
               ),
             ),
           ),
