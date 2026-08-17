@@ -23,7 +23,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makeDrainableWorker, type DrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
@@ -1711,7 +1711,23 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processDomainEventSafely);
+  const threadWorkers = new Map<string, DrainableWorker<ProviderIntentEvent>>();
+  const getThreadWorker = Effect.fn("getThreadWorker")(function* (threadId: ThreadId) {
+    const existing = threadWorkers.get(threadId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const worker = yield* makeDrainableWorker(processDomainEventSafely);
+    threadWorkers.set(threadId, worker);
+    return worker;
+  });
+  const routeProviderIntentEvent = Effect.fn("routeProviderIntentEvent")(function* (
+    event: ProviderIntentEvent,
+  ) {
+    const worker = yield* getThreadWorker(event.payload.threadId);
+    yield* worker.enqueue(event);
+  });
+  const routerWorker = yield* makeDrainableWorker(routeProviderIntentEvent);
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     // Turn-start events are hot and are not replayed when this reactor starts.
@@ -1741,7 +1757,7 @@ const make = Effect.gen(function* () {
         event.type === "thread.user-input-response-requested" ||
         event.type === "thread.session-stop-requested"
       ) {
-        return yield* worker.enqueue(event);
+        return yield* routerWorker.enqueue(event);
       }
     });
 
@@ -1776,7 +1792,8 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: Effect.gen(function* () {
-      yield* worker.drain;
+      yield* routerWorker.drain;
+      yield* Effect.forEach(threadWorkers.values(), (worker) => worker.drain, { discard: true });
       yield* threadTitleRegenerationWorker.drain;
     }),
   } satisfies ProviderCommandReactorShape;
