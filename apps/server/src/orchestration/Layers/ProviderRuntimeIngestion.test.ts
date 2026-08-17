@@ -2110,6 +2110,77 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("finalizes buffered assistant and reasoning output when an active turn aborts", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-buffered-abort");
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-buffered-abort"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: {},
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-assistant-delta-buffered-abort"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-buffered-abort"),
+      payload: { streamKind: "assistant_text", delta: "partial response" },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-delta-buffered-abort"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { streamKind: "reasoning_text", delta: "partial reasoning" },
+    });
+    await harness.drain();
+
+    harness.emit({
+      type: "turn.aborted",
+      eventId: asEventId("evt-turn-aborted-buffered-output"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: { reason: "user requested interruption" },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "interrupted" &&
+        entry.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-buffered-abort" &&
+            !message.streaming &&
+            message.text === "partial response",
+        ) &&
+        entry.activities.some(
+          (activity) =>
+            activity.kind === "reasoning.progress" &&
+            typeof activity.payload === "object" &&
+            activity.payload !== null &&
+            (activity.payload as { detail?: unknown }).detail === "partial reasoning",
+        ),
+    );
+    expect(thread.session?.activeTurnId).toBeNull();
+  });
+
   it("flushes and completes buffered assistant text when an approval request opens", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
