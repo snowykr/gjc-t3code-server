@@ -534,6 +534,24 @@ describe("CheckpointReactor", () => {
     const threadId = ThreadId.make("thread-1");
     const turnId = asTurnId("turn-aborted-checkpoint");
 
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-aborted-checkpoint"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
     harness.provider.emit({
       type: "turn.started",
       eventId: EventId.make("evt-turn-started-aborted-checkpoint"),
@@ -545,6 +563,23 @@ describe("CheckpointReactor", () => {
     await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0));
 
     NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "aborted work\n", "utf8");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-interrupted-aborted-checkpoint"),
+        threadId,
+        session: {
+          threadId,
+          status: "interrupted",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
     harness.provider.emit({
       type: "turn.aborted",
       eventId: EventId.make("evt-turn-aborted-checkpoint"),
@@ -569,6 +604,27 @@ describe("CheckpointReactor", () => {
       gitShowFileAtRef(harness.cwd, checkpointRefForThreadTurn(threadId, 1), "README.md"),
     ).toBe("aborted work\n");
     expect(thread.checkpoints).toHaveLength(1);
+    expect(thread.latestTurn?.state).toBe("interrupted");
+  });
+
+  it("does not checkpoint a stale abort without a matching active or interrupted turn", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+
+    harness.provider.emit({
+      type: "turn.aborted",
+      eventId: EventId.make("evt-turn-aborted-stale-checkpoint"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId: asTurnId("turn-stale-checkpoint"),
+      payload: { reason: "late provider event" },
+    });
+
+    await harness.drain();
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.checkpoints).toEqual([]);
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 1))).toBe(false);
   });
 
   it("refreshes local git status state on turn completion using the session cwd", async () => {

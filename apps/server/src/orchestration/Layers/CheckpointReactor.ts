@@ -369,6 +369,18 @@ const make = Effect.gen(function* () {
         return;
       }
 
+      if (event.type === "turn.aborted") {
+        const abortMatchesActiveTurn =
+          thread.session?.status === "running" && sameId(thread.session.activeTurnId, turnId);
+        const abortFollowsInterruptedTurn =
+          thread.session?.status === "interrupted" &&
+          thread.latestTurn?.state === "interrupted" &&
+          sameId(thread.latestTurn.turnId, turnId);
+        if (!abortMatchesActiveTurn && !abortFollowsInterruptedTurn) {
+          return;
+        }
+      }
+
       // When a primary turn is active, only that turn may produce completion checkpoints.
       if (thread.session?.activeTurnId && !sameId(thread.session.activeTurnId, turnId)) {
         return;
