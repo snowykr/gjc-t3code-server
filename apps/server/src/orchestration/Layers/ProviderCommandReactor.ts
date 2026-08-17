@@ -1194,11 +1194,7 @@ const make = Effect.gen(function* () {
         threadId: event.payload.threadId,
         turnId: interruptedTurn.turnId,
       });
-      if (
-        !observedAbortCheckpoint &&
-        (interruptedTurn.checkpointRef === null ||
-          String(interruptedTurn.checkpointRef).startsWith("provider-diff:"))
-      ) {
+      if (!observedAbortCheckpoint) {
         yield* checkpointReactor.reconcileInterruptedTurn({
           threadId: event.payload.threadId,
           turnId: interruptedTurn.turnId,
