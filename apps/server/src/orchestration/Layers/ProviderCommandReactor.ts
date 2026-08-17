@@ -1112,6 +1112,17 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    if (thread.session?.status === "running" && thread.session.activeTurnId !== null) {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.start.failed",
+        summary: "Provider turn start blocked",
+        detail: `Thread already has active turn '${thread.session.activeTurnId}'.`,
+        turnId: thread.session.activeTurnId,
+        createdAt: event.payload.createdAt,
+      });
+    }
+
     const isFirstUserMessageTurn =
       thread.messages.filter((entry) => entry.role === "user").length === 1;
     if (isFirstUserMessageTurn) {
@@ -1285,7 +1296,21 @@ const make = Effect.gen(function* () {
             threadId: event.payload.threadId,
             turnId: event.payload.turnId,
           })
-          .pipe(Effect.zipRight(Effect.failCause(cause))),
+          .pipe(
+            Effect.zipRight(
+              setThreadSession({
+                threadId: event.payload.threadId,
+                session: {
+                  ...thread.session!,
+                  status: "running",
+                  activeTurnId: event.payload.turnId,
+                  updatedAt: event.payload.createdAt,
+                },
+                createdAt: event.payload.createdAt,
+              }),
+            ),
+            Effect.zipRight(Effect.failCause(cause)),
+          ),
       ),
     );
   });
