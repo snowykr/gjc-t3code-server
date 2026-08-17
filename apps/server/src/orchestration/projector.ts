@@ -701,7 +701,8 @@ export function projectEvent(
             latestTurn: turnStillRunning
               ? thread.latestTurn
               : thread.latestTurn?.turnId === payload.turnId &&
-                  thread.latestTurn.state === "interrupted"
+                  thread.latestTurn.state === "interrupted" &&
+                  thread.session?.status === "interrupted"
                 ? thread.latestTurn
                 : {
                     turnId: payload.turnId,

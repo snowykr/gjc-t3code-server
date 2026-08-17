@@ -130,6 +130,17 @@ const make = Effect.gen(function* () {
     if (deferred !== undefined && deferred !== "completed") {
       yield* Deferred.succeed(deferred, undefined);
     }
+    yield* Effect.sleep("1 minute").pipe(
+      Effect.zipRight(
+        Ref.update(abortCheckpointDeferreds, (current) => {
+          if (current.get(key) !== "completed") return current;
+          const next = new Map(current);
+          next.delete(key);
+          return next;
+        }),
+      ),
+      Effect.forkDaemon,
+    );
   });
   const awaitAbortCheckpoint = (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
     Ref.get(abortCheckpointDeferreds).pipe(
