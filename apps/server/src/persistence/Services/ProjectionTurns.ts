@@ -153,6 +153,11 @@ export interface ProjectionTurnRepositoryShape {
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
+   * Deletes all unconsumed pending-start placeholder rows while preserving concrete turn rows.
+   */
+  readonly deleteAllPendingTurnStarts: () => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
    * Lists all projection rows for a thread, including pending placeholders, with checkpoint rows ordered before non-checkpoint rows.
    */
   readonly listByThreadId: (

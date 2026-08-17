@@ -35,7 +35,6 @@ import { sanitizeThreadTitle } from "../../textGeneration/TextGenerationUtils.ts
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
-import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -320,9 +319,9 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerService = yield* ProviderService;
   const checkpointReactor = yield* CheckpointReactor;
-  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -1640,6 +1639,11 @@ const make = Effect.gen(function* () {
   const worker = yield* makeDrainableWorker(processDomainEventSafely);
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
+    // Turn-start events are hot and are not replayed when this reactor starts.
+    // Remove only orphaned pending placeholders before subscribing so any new
+    // requests queued after startup retain their normal FIFO replacement semantics.
+    yield* projectionTurnRepository.deleteAllPendingTurnStarts();
+
     const interruptedTitleRegenerations = yield* findInterruptedThreadTitleRegenerations().pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
@@ -1703,6 +1707,4 @@ const make = Effect.gen(function* () {
   } satisfies ProviderCommandReactorShape;
 });
 
-export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
-  Layer.provide(ProjectionTurnRepositoryLive),
-);
+export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make);
