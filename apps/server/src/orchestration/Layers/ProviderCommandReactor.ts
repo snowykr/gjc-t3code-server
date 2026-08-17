@@ -1259,6 +1259,12 @@ const make = Effect.gen(function* () {
     }
 
     // Orchestration turn ids are not provider turn ids, so interrupt by session.
+    if (event.payload.turnId !== undefined) {
+      yield* checkpointReactor.registerAbortCheckpoint({
+        threadId: event.payload.threadId,
+        turnId: event.payload.turnId,
+      });
+    }
     yield* providerService.interruptTurn({ threadId: event.payload.threadId });
   });
 
