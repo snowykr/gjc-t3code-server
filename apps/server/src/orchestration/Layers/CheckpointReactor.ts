@@ -112,9 +112,7 @@ const make = Effect.gen(function* () {
     const deferred = yield* Deferred.make<void>();
     yield* Ref.modify(abortCheckpointDeferreds, (current) => {
       if (current.get(key) === "completed") {
-        const next = new Map(current);
-        next.delete(key);
-        return [undefined, next] as const;
+        return [undefined, current] as const;
       }
       if (current.has(key)) return [undefined, current] as const;
       const next = new Map(current);
