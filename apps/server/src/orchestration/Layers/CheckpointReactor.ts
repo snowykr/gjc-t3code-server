@@ -1072,6 +1072,13 @@ const make = Effect.gen(function* () {
             ),
           ),
         );
+        if (turnId) {
+          yield* completeAbortCheckpoint({
+            threadId: event.threadId,
+            turnId,
+            preserveCompletion: false,
+          });
+        }
       }
       return;
     }
