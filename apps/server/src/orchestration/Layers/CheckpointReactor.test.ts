@@ -485,6 +485,10 @@ describe("CheckpointReactor", () => {
       receipts,
       registerAbortCheckpoint: (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
         runtime!.runPromise(reactor.registerAbortCheckpoint(input)),
+      awaitAbortCheckpoint: (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
+        runtime!.runPromise(reactor.awaitAbortCheckpoint(input)),
+      reconcileInterruptedTurn: (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
+        runtime!.runPromise(reactor.reconcileInterruptedTurn(input)),
     };
   }
 
@@ -684,6 +688,103 @@ describe("CheckpointReactor", () => {
     const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
     expect(thread?.checkpoints).toEqual([]);
     expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 1))).toBe(false);
+  });
+
+  it("does not recapture a ready terminal checkpoint during interruption reconciliation", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-aborted-checkpoint-reconcile");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-aborted-checkpoint-reconcile"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-aborted-checkpoint-reconcile"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId,
+    });
+    await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0));
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "aborted work\n", "utf8");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-interrupted-aborted-checkpoint-reconcile"),
+        threadId,
+        session: {
+          threadId,
+          status: "interrupted",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    await harness.registerAbortCheckpoint({ threadId, turnId });
+    harness.provider.emit({
+      type: "turn.aborted",
+      eventId: EventId.make("evt-turn-aborted-checkpoint-reconcile"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId,
+      turnId,
+      payload: { reason: "user requested interruption" },
+    });
+
+    await waitForReceipt(
+      harness.receipts,
+      (receipt) =>
+        receipt.type === "checkpoint.diff.finalized" &&
+        receipt.turnId === turnId &&
+        receipt.status === "ready",
+    );
+    await waitForThread(harness.readModel, (entry) =>
+      entry.checkpoints.some(
+        (checkpoint) =>
+          checkpoint.turnId === turnId &&
+          checkpoint.status === "ready" &&
+          checkpoint.checkpointTurnCount === 1,
+      ),
+    );
+    await harness.drain();
+    expect(await harness.awaitAbortCheckpoint({ threadId, turnId })).toBe(true);
+    expect(await harness.awaitAbortCheckpoint({ threadId, turnId })).toBe(false);
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "post-abort edit\n", "utf8");
+    await harness.reconcileInterruptedTurn({ threadId, turnId });
+
+    expect(
+      gitShowFileAtRef(harness.cwd, checkpointRefForThreadTurn(threadId, 1), "README.md"),
+    ).toBe("aborted work\n");
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe(
+      "post-abort edit\n",
+    );
+    expect(
+      harness.receipts.filter(
+        (receipt) => receipt.type === "checkpoint.diff.finalized" && receipt.turnId === turnId,
+      ),
+    ).toHaveLength(1);
   });
 
   it("checkpoints an interrupted turn after a newer turn has started", async () => {

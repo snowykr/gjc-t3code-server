@@ -2538,6 +2538,162 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
         assert.deepEqual(pendingRows, []);
       }),
     );
+
+    it.effect("scopes interrupted pending-start retention to the current session turn", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const append = (event: Parameters<typeof eventStore.append>[0]) => eventStore.append(event);
+
+        const historicalThreadId = ThreadId.make("thread-interrupted-history");
+        const historicalTurnId = TurnId.make("turn-interrupted-history");
+        const historicalPendingMessageId = MessageId.make("message-interrupted-history");
+        const historicalAt = "2026-02-26T14:10:00.000Z";
+        const historicalPendingAt = "2026-02-26T14:10:01.000Z";
+
+        yield* append({
+          type: "thread.turn-interrupt-requested",
+          eventId: EventId.make("evt-interrupted-history-turn"),
+          aggregateKind: "thread",
+          aggregateId: historicalThreadId,
+          occurredAt: historicalAt,
+          commandId: CommandId.make("cmd-interrupted-history-turn"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupted-history-turn"),
+          metadata: {},
+          payload: {
+            threadId: historicalThreadId,
+            turnId: historicalTurnId,
+            createdAt: historicalAt,
+          },
+        });
+        yield* append({
+          type: "thread.turn-start-requested",
+          eventId: EventId.make("evt-interrupted-history-pending"),
+          aggregateKind: "thread",
+          aggregateId: historicalThreadId,
+          occurredAt: historicalPendingAt,
+          commandId: CommandId.make("cmd-interrupted-history-pending"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupted-history-pending"),
+          metadata: {},
+          payload: {
+            threadId: historicalThreadId,
+            messageId: historicalPendingMessageId,
+            runtimeMode: "approval-required",
+            createdAt: historicalPendingAt,
+          },
+        });
+        yield* append({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-interrupted-history-session"),
+          aggregateKind: "thread",
+          aggregateId: historicalThreadId,
+          occurredAt: "2026-02-26T14:10:02.000Z",
+          commandId: CommandId.make("cmd-interrupted-history-session"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupted-history-session"),
+          metadata: {},
+          payload: {
+            threadId: historicalThreadId,
+            session: {
+              threadId: historicalThreadId,
+              status: "interrupted",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: "2026-02-26T14:10:02.000Z",
+            },
+          },
+        });
+
+        const currentThreadId = ThreadId.make("thread-interrupted-current");
+        const currentTurnId = TurnId.make("turn-interrupted-current");
+        const currentPendingMessageId = MessageId.make("message-interrupted-current");
+        const currentAt = "2026-02-26T14:20:00.000Z";
+        const currentPendingAt = "2026-02-26T14:20:01.000Z";
+
+        yield* append({
+          type: "thread.turn-interrupt-requested",
+          eventId: EventId.make("evt-interrupted-current-turn"),
+          aggregateKind: "thread",
+          aggregateId: currentThreadId,
+          occurredAt: currentAt,
+          commandId: CommandId.make("cmd-interrupted-current-turn"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupted-current-turn"),
+          metadata: {},
+          payload: {
+            threadId: currentThreadId,
+            turnId: currentTurnId,
+            createdAt: currentAt,
+          },
+        });
+        yield* append({
+          type: "thread.turn-start-requested",
+          eventId: EventId.make("evt-interrupted-current-pending"),
+          aggregateKind: "thread",
+          aggregateId: currentThreadId,
+          occurredAt: currentPendingAt,
+          commandId: CommandId.make("cmd-interrupted-current-pending"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupted-current-pending"),
+          metadata: {},
+          payload: {
+            threadId: currentThreadId,
+            messageId: currentPendingMessageId,
+            runtimeMode: "approval-required",
+            createdAt: currentPendingAt,
+          },
+        });
+        yield* append({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-interrupted-current-session"),
+          aggregateKind: "thread",
+          aggregateId: currentThreadId,
+          occurredAt: "2026-02-26T14:20:02.000Z",
+          commandId: CommandId.make("cmd-interrupted-current-session"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupted-current-session"),
+          metadata: {},
+          payload: {
+            threadId: currentThreadId,
+            session: {
+              threadId: currentThreadId,
+              status: "interrupted",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: currentTurnId,
+              lastError: null,
+              updatedAt: "2026-02-26T14:20:02.000Z",
+            },
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+
+        const pendingRows = yield* sql<{
+          readonly threadId: string;
+          readonly messageId: string;
+        }>`
+            SELECT
+              thread_id AS "threadId",
+              pending_message_id AS "messageId"
+            FROM projection_turns
+            WHERE turn_id IS NULL
+              AND state = 'pending'
+            ORDER BY thread_id ASC
+          `;
+        assert.deepEqual(pendingRows, [
+          {
+            threadId: currentThreadId,
+            messageId: currentPendingMessageId,
+          },
+        ]);
+      }),
+    );
   },
 );
 

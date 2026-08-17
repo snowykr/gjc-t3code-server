@@ -480,10 +480,12 @@ const make = Effect.gen(function* () {
         const abortGate = (yield* Ref.get(abortCheckpointDeferreds)).get(
           abortCheckpointKey(thread.id, turnId),
         );
-        const hasFinalCheckpoint = thread.checkpoints.some(
-          (checkpoint) => checkpoint.turnId === turnId && checkpoint.status !== "missing",
+        // A ready checkpoint is durable evidence that terminal capture already
+        // completed; unlike the in-memory abort gate, it survives restarts.
+        const hasReadyCheckpoint = thread.checkpoints.some(
+          (checkpoint) => checkpoint.turnId === turnId && checkpoint.status === "ready",
         );
-        if (abortGate === "completed" && hasFinalCheckpoint) {
+        if (hasReadyCheckpoint) {
           return;
         }
         const abortMatchesActiveTurn =
