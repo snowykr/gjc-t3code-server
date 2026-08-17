@@ -387,6 +387,30 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  const cleanupRejectedTurnStart = (
+    event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
+  ) =>
+    projectionTurnRepository
+      .deletePendingTurnStartByMessageId({
+        threadId: event.payload.threadId,
+        messageId: event.payload.messageId,
+      })
+      .pipe(
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) {
+            return Effect.failCause(cause);
+          }
+          return Effect.logWarning(
+            "provider command reactor failed to clean up rejected turn start",
+            {
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              cause: Cause.pretty(cause),
+            },
+          );
+        }),
+      );
+
   const sanitizeProviderFailureDetail = (provider: string, detail: string): string => {
     // Authentication-failure classification already happens at the adapter
     // boundary (AcpAdapterSupport.safeAcpFailureDetail maps a proven ACP auth
@@ -1096,6 +1120,7 @@ const make = Effect.gen(function* () {
 
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
+      yield* cleanupRejectedTurnStart(event);
       return;
     }
 
@@ -1108,7 +1133,7 @@ const make = Effect.gen(function* () {
         detail: `User message '${event.payload.messageId}' was not found for turn start request.`,
         turnId: null,
         createdAt: event.payload.createdAt,
-      });
+      }).pipe(Effect.ensuring(cleanupRejectedTurnStart(event)));
       return;
     }
 
@@ -1129,7 +1154,7 @@ const make = Effect.gen(function* () {
           detail: `Thread already has active turn '${thread.session.activeTurnId}'.`,
           turnId: thread.session.activeTurnId,
           createdAt: event.payload.createdAt,
-        });
+        }).pipe(Effect.ensuring(cleanupRejectedTurnStart(event)));
       }
     }
 
@@ -1185,6 +1210,7 @@ const make = Effect.gen(function* () {
             createdAt: event.payload.createdAt,
           }),
         ),
+        Effect.ensuring(cleanupRejectedTurnStart(event)),
         Effect.asVoid,
       );
     };
