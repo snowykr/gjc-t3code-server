@@ -1167,11 +1167,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             const existingTurns = yield* projectionTurnRepository.listByThreadId({
               threadId: event.payload.threadId,
             });
-            const hasPriorTurn = existingTurns.some((turn) => turn.turnId !== null);
+            const hasInterruptedPriorTurn = existingTurns.some(
+              (turn) => turn.turnId !== null && turn.state === "interrupted",
+            );
             if (
               event.payload.session.status === "error" ||
               event.payload.session.status === "stopped" ||
-              (event.payload.session.status === "interrupted" && !hasPriorTurn)
+              (event.payload.session.status === "interrupted" && !hasInterruptedPriorTurn)
             ) {
               yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
                 threadId: event.payload.threadId,
