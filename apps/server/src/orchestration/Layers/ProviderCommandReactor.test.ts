@@ -410,6 +410,8 @@ describe("ProviderCommandReactor", () => {
         Layer.succeed(CheckpointReactor, {
           start: () => Effect.void,
           drain: Effect.void,
+          awaitAbortCheckpoint: () => Effect.void,
+          registerAbortCheckpoint: () => Effect.void,
         }),
       ),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),

@@ -14,8 +14,10 @@ import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import type * as PlatformError from "effect/PlatformError";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
@@ -69,6 +71,8 @@ function sameId(left: string | null | undefined, right: string | null | undefine
   return left === right;
 }
 
+const abortCheckpointKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
+
 function checkpointStatusFromRuntime(status: string | undefined): "ready" | "missing" | "error" {
   switch (status) {
     case "failed":
@@ -96,6 +100,40 @@ const make = Effect.gen(function* () {
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
+  const abortCheckpointDeferreds = yield* Ref.make(new Map<string, Deferred.Deferred<void>>());
+  const registerAbortCheckpoint = Effect.fn("registerAbortCheckpoint")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+  }) {
+    const key = abortCheckpointKey(input.threadId, input.turnId);
+    const deferred = yield* Deferred.make<void>();
+    yield* Ref.modify(abortCheckpointDeferreds, (current) => {
+      if (current.has(key)) return [undefined, current] as const;
+      const next = new Map(current);
+      next.set(key, deferred);
+      return [undefined, next] as const;
+    });
+  });
+  const completeAbortCheckpoint = Effect.fn("completeAbortCheckpoint")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+  }) {
+    const key = abortCheckpointKey(input.threadId, input.turnId);
+    const deferred = yield* Ref.modify(abortCheckpointDeferreds, (current) => {
+      const next = new Map(current);
+      const value = next.get(key);
+      next.delete(key);
+      return [value, next] as const;
+    });
+    if (deferred !== undefined) yield* Deferred.succeed(deferred, undefined);
+  });
+  const awaitAbortCheckpoint = (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
+    Ref.get(abortCheckpointDeferreds).pipe(
+      Effect.flatMap((current) => {
+        const deferred = current.get(abortCheckpointKey(input.threadId, input.turnId));
+        return deferred === undefined ? Effect.void : Deferred.await(deferred);
+      }),
+    );
 
   const appendRevertFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -915,6 +953,9 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
+      if (event.type === "turn.aborted" && turnId) {
+        yield* completeAbortCheckpoint({ threadId: event.threadId, turnId });
+      }
       return;
     }
   });
@@ -976,6 +1017,8 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: worker.drain,
+    awaitAbortCheckpoint,
+    registerAbortCheckpoint,
   } satisfies CheckpointReactorShape;
 });
 

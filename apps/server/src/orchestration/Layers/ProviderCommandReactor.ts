@@ -34,6 +34,8 @@ import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { sanitizeThreadTitle } from "../../textGeneration/TextGenerationUtils.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
+import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -320,6 +322,7 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const checkpointReactor = yield* CheckpointReactor;
+  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -1195,10 +1198,20 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    // An abort can have already settled in ingestion while its filesystem
-    // checkpoint is still queued. Never let a new provider turn edit the
-    // workspace until that checkpoint worker reaches quiescence.
-    yield* checkpointReactor.drain;
+    const interruptedTurns = yield* projectionTurnRepository.listByThreadId({
+      threadId: event.payload.threadId,
+    });
+    yield* Effect.forEach(
+      interruptedTurns.filter((turn) => turn.turnId !== null && turn.state === "interrupted"),
+      (turn) =>
+        turn.turnId === null
+          ? Effect.void
+          : checkpointReactor.awaitAbortCheckpoint({
+              threadId: event.payload.threadId,
+              turnId: turn.turnId,
+            }),
+      { concurrency: 1 },
+    );
     yield* providerService
       .sendTurn(sendTurnRequest.value)
       .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
@@ -1565,4 +1578,6 @@ const make = Effect.gen(function* () {
   } satisfies ProviderCommandReactorShape;
 });
 
-export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make);
+export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
+  Layer.provide(ProjectionTurnRepositoryLive),
+);
