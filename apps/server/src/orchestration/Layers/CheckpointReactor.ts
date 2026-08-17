@@ -953,7 +953,37 @@ const make = Effect.gen(function* () {
 
     if (event.type === "turn.completed" || event.type === "turn.aborted") {
       const turnId = toTurnId(event.turnId);
-      yield* Effect.gen(function* () {
+      if (event.type === "turn.aborted" && turnId) {
+        const capturedRef = yield* Ref.make(false);
+        yield* Effect.gen(function* () {
+          yield* refreshLocalGitStatusFromTurnTerminal(event);
+          const captured = yield* captureCheckpointFromTurnTerminal(event).pipe(
+            Effect.catch((error) =>
+              Effect.flatMap(nowIso, (createdAt) =>
+                appendCaptureFailureActivity({
+                  threadId: event.threadId,
+                  turnId,
+                  detail: error.message,
+                  createdAt,
+                }).pipe(Effect.catch(() => Effect.void)),
+              ).pipe(Effect.as(false)),
+            ),
+          );
+          yield* Ref.set(capturedRef, captured === true);
+        }).pipe(
+          Effect.ensuring(
+            Ref.get(capturedRef).pipe(
+              Effect.flatMap((preserveCompletion) =>
+                completeAbortCheckpoint({
+                  threadId: event.threadId,
+                  turnId,
+                  preserveCompletion,
+                }),
+              ),
+            ),
+          ),
+        );
+      } else {
         yield* refreshLocalGitStatusFromTurnTerminal(event);
         yield* captureCheckpointFromTurnTerminal(event).pipe(
           Effect.catch((error) =>
@@ -967,17 +997,7 @@ const make = Effect.gen(function* () {
             ),
           ),
         );
-      }).pipe(
-        event.type === "turn.aborted" && turnId
-          ? Effect.ensuring(
-              completeAbortCheckpoint({
-                threadId: event.threadId,
-                turnId,
-                preserveCompletion: false,
-              }),
-            )
-          : (effect) => effect,
-      );
+      }
       return;
     }
   });
