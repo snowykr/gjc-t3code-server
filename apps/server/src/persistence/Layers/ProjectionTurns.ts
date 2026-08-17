@@ -209,7 +209,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           AND state = 'pending'
           AND pending_message_id IS NOT NULL
           AND checkpoint_turn_count IS NULL
-        ORDER BY requested_at ASC, row_id ASC
+        ORDER BY row_id ASC
         LIMIT 1
       `,
   });

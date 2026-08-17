@@ -2568,7 +2568,7 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
               planId: "plan-b",
             },
             runtimeMode: "approval-required",
-            createdAt: "2026-02-26T15:00:01.000Z",
+            createdAt: "2026-02-26T15:00:02.000Z",
           },
         });
         yield* eventStore.append({
@@ -2589,7 +2589,7 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
               planId: "plan-c",
             },
             runtimeMode: "approval-required",
-            createdAt: "2026-02-26T15:00:02.000Z",
+            createdAt: "2026-02-26T15:00:01.000Z",
           },
         });
         yield* eventStore.append({
@@ -2631,20 +2631,20 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
             state
           FROM projection_turns
           WHERE thread_id = ${threadId}
-          ORDER BY requested_at ASC, row_id ASC
+          ORDER BY row_id ASC
         `;
         assert.deepEqual(afterBRows, [
-          {
-            turnId: turnB,
-            pendingMessageId: messageB,
-            sourceProposedPlanId: "plan-b",
-            state: "running",
-          },
           {
             turnId: null,
             pendingMessageId: messageC,
             sourceProposedPlanId: "plan-c",
             state: "pending",
+          },
+          {
+            turnId: turnB,
+            pendingMessageId: messageB,
+            sourceProposedPlanId: "plan-b",
+            state: "running",
           },
         ]);
 
@@ -2687,7 +2687,7 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
             state
           FROM projection_turns
           WHERE thread_id = ${threadId}
-          ORDER BY requested_at ASC, row_id ASC
+          ORDER BY row_id ASC
         `;
         assert.deepEqual(finalRows, [
           {
