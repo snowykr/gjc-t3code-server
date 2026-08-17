@@ -150,7 +150,19 @@ const make = Effect.gen(function* () {
       Effect.flatMap(({ deferred, observed }) => {
         return deferred === undefined
           ? Effect.succeed(observed)
-          : Deferred.await(deferred).pipe(Effect.as(true));
+          : Deferred.await(deferred).pipe(
+              Effect.flatMap(() =>
+                Ref.modify(abortCheckpointDeferreds, (current) => {
+                  const key = abortCheckpointKey(input.threadId, input.turnId);
+                  if (current.get(key) !== "completed") {
+                    return [undefined, current] as const;
+                  }
+                  const next = new Map(current);
+                  next.delete(key);
+                  return [undefined, next] as const;
+                }).pipe(Effect.as(true)),
+              ),
+            );
       }),
     );
   const cancelAbortCheckpoint = (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
@@ -187,12 +199,47 @@ const make = Effect.gen(function* () {
       threadId: input.threadId,
       turnId: input.turnId,
     });
+    const abortGate = (yield* Ref.get(abortCheckpointDeferreds)).get(
+      abortCheckpointKey(input.threadId, input.turnId),
+    );
+    const hasOutstandingAbortGate = abortGate !== undefined && abortGate !== "completed";
     if (
       hasReadyCheckpoint &&
+      !hasOutstandingAbortGate &&
       Option.isSome(interruptedTurn) &&
       interruptedTurn.value.isTerminalAbortCheckpoint
     ) {
       return;
+    }
+    if (!hasOutstandingAbortGate) {
+      const projects = yield* resolveThreadProjects(thread.projectId);
+      const checkpointCwd = yield* resolveCheckpointCwd({
+        threadId: thread.id,
+        thread,
+        projects,
+        preferSessionRuntime: true,
+      });
+      if (checkpointCwd) {
+        const existingCheckpoint = thread.checkpoints.find(
+          (checkpoint) => checkpoint.turnId === input.turnId,
+        );
+        const currentTurnCount = thread.checkpoints.reduce(
+          (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
+          0,
+        );
+        const expectedCheckpointRef = checkpointRefForThreadTurn(
+          thread.id,
+          existingCheckpoint?.checkpointTurnCount ?? currentTurnCount + 1,
+        );
+        if (
+          yield* checkpointStore.hasCheckpointRef({
+            cwd: checkpointCwd,
+            checkpointRef: expectedCheckpointRef,
+          })
+        ) {
+          return;
+        }
+      }
     }
     yield* registerAbortCheckpoint(input);
     const event: Extract<ProviderRuntimeEvent, { type: "turn.aborted" }> = {

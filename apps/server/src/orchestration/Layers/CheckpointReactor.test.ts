@@ -918,6 +918,157 @@ describe("CheckpointReactor", () => {
     ).toHaveLength(1);
   });
 
+  it("treats an existing hidden checkpoint ref as crash-window completion during reconciliation", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-aborted-crash-window");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const checkpointRef = checkpointRefForThreadTurn(threadId, 1);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-interrupted-crash-window"),
+        threadId,
+        session: {
+          threadId,
+          status: "interrupted",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await runtime!.runPromise(
+      harness.checkpointStore.captureCheckpoint({
+        cwd: harness.cwd,
+        checkpointRef: checkpointRefForThreadTurn(threadId, 0),
+      }),
+    );
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "aborted before crash\n", "utf8");
+    await runtime!.runPromise(
+      harness.checkpointStore.captureCheckpoint({
+        cwd: harness.cwd,
+        checkpointRef,
+      }),
+    );
+
+    // The terminal projection dispatch was lost, but the durable checkpoint ref
+    // survived the crash. Keep a missing projection entry so reconciliation has
+    // the interrupted turn context without triggering placeholder recapture.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-crash-window-placeholder"),
+        threadId,
+        turnId,
+        completedAt: createdAt,
+        checkpointRef,
+        status: "missing",
+        files: [],
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+    await waitForThread(
+      harness.readModel,
+      (entry) => entry.latestTurn?.turnId === turnId && entry.checkpoints.length === 1,
+    );
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "edited after restart\n", "utf8");
+    await harness.reconcileInterruptedTurn({ threadId, turnId });
+    await harness.drain();
+
+    expect(gitShowFileAtRef(harness.cwd, checkpointRef, "README.md")).toBe(
+      "aborted before crash\n",
+    );
+    expect(
+      harness.receipts.filter(
+        (receipt) => receipt.type === "checkpoint.diff.finalized" && receipt.turnId === turnId,
+      ),
+    ).toHaveLength(0);
+    const interruptedTurn = await runtime!.runPromise(
+      harness.projectionTurnRepository.getByTurnId({ threadId, turnId }),
+    );
+    expect(interruptedTurn._tag).toBe("Some");
+    if (interruptedTurn._tag === "Some") {
+      expect(interruptedTurn.value.isTerminalAbortCheckpoint).toBe(false);
+    }
+  });
+
+  it("evicts a completed abort gate after concurrent deferred waiters wake", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-abort-gate-eviction");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-gate-eviction"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await runtime!.runPromise(
+      harness.checkpointStore.captureCheckpoint({
+        cwd: harness.cwd,
+        checkpointRef: checkpointRefForThreadTurn(threadId, 0),
+      }),
+    );
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "first abort\n", "utf8");
+
+    await harness.registerAbortCheckpoint({ threadId, turnId });
+    const firstWaiter = harness.awaitAbortCheckpoint({ threadId, turnId });
+    const secondWaiter = harness.awaitAbortCheckpoint({ threadId, turnId });
+    await Effect.runPromise(Effect.yieldNow);
+    harness.provider.emit({
+      type: "turn.aborted",
+      eventId: EventId.make("evt-turn-aborted-gate-eviction-first"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId,
+      payload: { reason: "user requested interruption" },
+    });
+    expect(await firstWaiter).toBe(true);
+    expect(await secondWaiter).toBe(true);
+    await harness.drain();
+
+    await harness.registerAbortCheckpoint({ threadId, turnId });
+    let thirdWaiterSettled = false;
+    const thirdWaiter = harness.awaitAbortCheckpoint({ threadId, turnId }).then((observed) => {
+      thirdWaiterSettled = true;
+      return observed;
+    });
+    await Effect.runPromise(Effect.sleep("10 millis"));
+    expect(thirdWaiterSettled).toBe(false);
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "second abort\n", "utf8");
+    harness.provider.emit({
+      type: "turn.aborted",
+      eventId: EventId.make("evt-turn-aborted-gate-eviction-second"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId,
+      payload: { reason: "user requested interruption again" },
+    });
+    expect(await thirdWaiter).toBe(true);
+  });
+
   it("checkpoints an interrupted turn after a newer turn has started", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const threadId = ThreadId.make("thread-1");
