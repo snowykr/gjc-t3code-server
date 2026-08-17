@@ -463,6 +463,15 @@ const make = Effect.gen(function* () {
       }
 
       if (event.type === "turn.aborted") {
+        const abortGate = (yield* Ref.get(abortCheckpointDeferreds)).get(
+          abortCheckpointKey(thread.id, turnId),
+        );
+        const hasFinalCheckpoint = thread.checkpoints.some(
+          (checkpoint) => checkpoint.turnId === turnId && checkpoint.status !== "missing",
+        );
+        if (abortGate === "completed" && hasFinalCheckpoint) {
+          return;
+        }
         const abortMatchesActiveTurn =
           thread.session?.status === "running" && sameId(thread.session.activeTurnId, turnId);
         const interruptedTurn = yield* projectionTurnRepository.getByTurnId({
@@ -472,7 +481,7 @@ const make = Effect.gen(function* () {
         const abortFollowsAcceptedAbort =
           Option.isSome(interruptedTurn) &&
           interruptedTurn.value.state === "interrupted" &&
-          (yield* Ref.get(abortCheckpointDeferreds)).has(abortCheckpointKey(thread.id, turnId));
+          abortGate !== undefined;
         if (!abortMatchesActiveTurn && !abortFollowsAcceptedAbort) {
           return;
         }
