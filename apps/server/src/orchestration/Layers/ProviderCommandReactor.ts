@@ -1113,14 +1113,23 @@ const make = Effect.gen(function* () {
     }
 
     if (thread.session?.status === "running" && thread.session.activeTurnId !== null) {
-      return yield* appendProviderFailureActivity({
+      const observedAbortCheckpoint = yield* checkpointReactor.awaitAbortCheckpoint({
         threadId: event.payload.threadId,
-        kind: "provider.turn.start.failed",
-        summary: "Provider turn start blocked",
-        detail: `Thread already has active turn '${thread.session.activeTurnId}'.`,
         turnId: thread.session.activeTurnId,
-        createdAt: event.payload.createdAt,
       });
+      if (observedAbortCheckpoint) {
+        // The terminal event is already in flight. Continue to the normal
+        // checkpoint/start gate below instead of dropping this queued turn.
+      } else {
+        return yield* appendProviderFailureActivity({
+          threadId: event.payload.threadId,
+          kind: "provider.turn.start.failed",
+          summary: "Provider turn start blocked",
+          detail: `Thread already has active turn '${thread.session.activeTurnId}'.`,
+          turnId: thread.session.activeTurnId,
+          createdAt: event.payload.createdAt,
+        });
+      }
     }
 
     const isFirstUserMessageTurn =
