@@ -138,7 +138,11 @@ const make = Effect.gen(function* () {
     const deferred = yield* Ref.modify(abortCheckpointDeferreds, (current) => {
       const next = new Map(current);
       const value = next.get(key);
-      if (value !== undefined) next.set(key, "completed");
+      // Capture can finish before ProviderRuntimeIngestion registers its
+      // abort gate. Keep completion evidence in that ordering window so the
+      // late registration remains consumable instead of creating a deferred
+      // that can never be resolved.
+      next.set(key, "completed");
       return [value, next] as const;
     });
     if (deferred !== undefined && deferred !== "completed") {

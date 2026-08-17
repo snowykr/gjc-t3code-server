@@ -683,6 +683,80 @@ describe("CheckpointReactor", () => {
     ).toHaveLength(1);
   });
 
+  it("retains a consumable completion sentinel when abort capture precedes gate registration", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-abort-before-gate-registration");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-abort-before-gate-registration"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-abort-before-gate-registration"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId,
+    });
+    await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0));
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "aborted work\n", "utf8");
+    harness.provider.emit({
+      type: "turn.aborted",
+      eventId: EventId.make("evt-turn-aborted-before-gate-registration"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId,
+      payload: { reason: "user requested interruption" },
+    });
+
+    await waitForReceipt(
+      harness.receipts,
+      (receipt) =>
+        receipt.type === "checkpoint.diff.finalized" &&
+        receipt.turnId === turnId &&
+        receipt.status === "ready",
+    );
+
+    // Ingestion registers its gate after the reactor has already captured the
+    // accepted provider abort. The completion sentinel must satisfy the late
+    // waiter rather than leave it blocked forever.
+    await harness.registerAbortCheckpoint({ threadId, turnId });
+    const observed = await runtime!.runPromise(
+      harness
+        .awaitAbortCheckpointEffect({ threadId, turnId })
+        .pipe(Effect.timeoutOption("50 millis")),
+    );
+    expect(observed._tag).toBe("Some");
+    if (observed._tag === "Some") {
+      expect(observed.value).toBe(true);
+    }
+    expect(await harness.awaitAbortCheckpoint({ threadId, turnId })).toBe(false);
+    expect(
+      harness.receipts.filter(
+        (receipt) => receipt.type === "checkpoint.diff.finalized" && receipt.turnId === turnId,
+      ),
+    ).toHaveLength(1);
+  });
+
   it("refreshes a ready mid-turn checkpoint when an accepted abort arrives", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const threadId = ThreadId.make("thread-1");
