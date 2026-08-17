@@ -490,6 +490,7 @@ const make = Effect.gen(function* () {
       // ProviderRuntimeIngestion may insert placeholder entries with status "missing"
       // before this reactor runs; those must not prevent real git capture.
       if (
+        event.type !== "turn.aborted" &&
         thread.checkpoints.some(
           (checkpoint) => checkpoint.turnId === turnId && checkpoint.status !== "missing",
         )
@@ -510,15 +511,15 @@ const make = Effect.gen(function* () {
 
       // If a placeholder checkpoint exists for this turn, reuse its turn count
       // instead of incrementing past it.
-      const existingPlaceholder = thread.checkpoints.find(
-        (checkpoint) => checkpoint.turnId === turnId && checkpoint.status === "missing",
+      const existingCheckpoint = thread.checkpoints.find(
+        (checkpoint) => checkpoint.turnId === turnId,
       );
       const currentTurnCount = thread.checkpoints.reduce(
         (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
         0,
       );
-      const nextTurnCount = existingPlaceholder
-        ? existingPlaceholder.checkpointTurnCount
+      const nextTurnCount = existingCheckpoint
+        ? existingCheckpoint.checkpointTurnCount
         : currentTurnCount + 1;
 
       yield* captureAndDispatchCheckpoint({
