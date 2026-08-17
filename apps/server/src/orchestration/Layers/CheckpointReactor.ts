@@ -110,6 +110,11 @@ const make = Effect.gen(function* () {
     const key = abortCheckpointKey(input.threadId, input.turnId);
     const deferred = yield* Deferred.make<void>();
     yield* Ref.modify(abortCheckpointDeferreds, (current) => {
+      if (current.get(key) === "completed") {
+        const next = new Map(current);
+        next.delete(key);
+        return [undefined, next] as const;
+      }
       if (current.has(key)) return [undefined, current] as const;
       const next = new Map(current);
       next.set(key, deferred);
@@ -130,17 +135,6 @@ const make = Effect.gen(function* () {
     if (deferred !== undefined && deferred !== "completed") {
       yield* Deferred.succeed(deferred, undefined);
     }
-    yield* Effect.sleep("1 minute").pipe(
-      Effect.zipRight(
-        Ref.update(abortCheckpointDeferreds, (current) => {
-          if (current.get(key) !== "completed") return current;
-          const next = new Map(current);
-          next.delete(key);
-          return next;
-        }),
-      ),
-      Effect.forkDaemon,
-    );
   });
   const awaitAbortCheckpoint = (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
     Ref.get(abortCheckpointDeferreds).pipe(
@@ -957,22 +951,25 @@ const make = Effect.gen(function* () {
 
     if (event.type === "turn.completed" || event.type === "turn.aborted") {
       const turnId = toTurnId(event.turnId);
-      yield* refreshLocalGitStatusFromTurnTerminal(event);
-      yield* captureCheckpointFromTurnTerminal(event).pipe(
-        Effect.catch((error) =>
-          Effect.flatMap(nowIso, (createdAt) =>
-            appendCaptureFailureActivity({
-              threadId: event.threadId,
-              turnId,
-              detail: error.message,
-              createdAt,
-            }).pipe(Effect.catch(() => Effect.void)),
+      yield* Effect.gen(function* () {
+        yield* refreshLocalGitStatusFromTurnTerminal(event);
+        yield* captureCheckpointFromTurnTerminal(event).pipe(
+          Effect.catch((error) =>
+            Effect.flatMap(nowIso, (createdAt) =>
+              appendCaptureFailureActivity({
+                threadId: event.threadId,
+                turnId,
+                detail: error.message,
+                createdAt,
+              }).pipe(Effect.catch(() => Effect.void)),
+            ),
           ),
-        ),
+        );
+      }).pipe(
+        event.type === "turn.aborted" && turnId
+          ? Effect.ensuring(completeAbortCheckpoint({ threadId: event.threadId, turnId }))
+          : (effect) => effect,
       );
-      if (event.type === "turn.aborted" && turnId) {
-        yield* completeAbortCheckpoint({ threadId: event.threadId, turnId });
-      }
       return;
     }
   });
