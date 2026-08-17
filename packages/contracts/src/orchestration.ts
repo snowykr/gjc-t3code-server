@@ -980,6 +980,7 @@ const ThreadSessionSetCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  interruptedTurnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });
 
@@ -1318,6 +1319,7 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  interruptedTurnId: Schema.optional(TurnId),
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({

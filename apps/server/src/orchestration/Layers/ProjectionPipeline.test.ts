@@ -2705,7 +2705,7 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
         ]);
       }),
     );
-    it.effect("retains queued starts only for an interrupted latest turn", () =>
+    it.effect("retains queued starts only for an explicit interrupted turn", () =>
       Effect.gen(function* () {
         const projectionPipeline = yield* OrchestrationProjectionPipeline;
         const eventStore = yield* OrchestrationEventStore;
@@ -2744,6 +2744,29 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
             worktreePath: null,
             createdAt: "2026-02-26T14:09:59.000Z",
             updatedAt: "2026-02-26T14:09:59.000Z",
+          },
+        });
+        yield* appendAndProject({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-interrupted-history-session-start"),
+          aggregateKind: "thread",
+          aggregateId: historicalThreadId,
+          occurredAt: "2026-02-26T14:09:59.500Z",
+          commandId: CommandId.make("cmd-interrupted-history-session-start"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupted-history-session-start"),
+          metadata: {},
+          payload: {
+            threadId: historicalThreadId,
+            session: {
+              threadId: historicalThreadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: historicalTurnId,
+              lastError: null,
+              updatedAt: "2026-02-26T14:09:59.500Z",
+            },
           },
         });
         yield* appendAndProject({
@@ -2911,6 +2934,7 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
               lastError: null,
               updatedAt: "2026-02-26T14:20:03.000Z",
             },
+            interruptedTurnId: currentTurnId,
           },
         });
 
