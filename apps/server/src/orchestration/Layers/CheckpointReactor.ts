@@ -138,12 +138,16 @@ const make = Effect.gen(function* () {
     }
   });
   const awaitAbortCheckpoint = (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
-    Ref.get(abortCheckpointDeferreds).pipe(
-      Effect.flatMap((current) => {
-        const deferred = current.get(abortCheckpointKey(input.threadId, input.turnId));
-        return deferred === undefined || deferred === "completed"
-          ? Effect.void
-          : Deferred.await(deferred);
+    Ref.modify(abortCheckpointDeferreds, (current) => {
+      const key = abortCheckpointKey(input.threadId, input.turnId);
+      const deferred = current.get(key);
+      if (deferred !== "completed") return [deferred, current] as const;
+      const next = new Map(current);
+      next.delete(key);
+      return [undefined, next] as const;
+    }).pipe(
+      Effect.flatMap((deferred) => {
+        return deferred === undefined ? Effect.void : Deferred.await(deferred);
       }),
     );
 
