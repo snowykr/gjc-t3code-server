@@ -1188,9 +1188,17 @@ const make = Effect.gen(function* () {
       (turn) =>
         turn.turnId === null
           ? Effect.void
-          : checkpointReactor.awaitAbortCheckpoint({
-              threadId: event.payload.threadId,
-              turnId: turn.turnId,
+          : Effect.gen(function* () {
+              if (turn.checkpointRef === null) {
+                yield* checkpointReactor.reconcileInterruptedTurn({
+                  threadId: event.payload.threadId,
+                  turnId: turn.turnId,
+                });
+              }
+              yield* checkpointReactor.awaitAbortCheckpoint({
+                threadId: event.payload.threadId,
+                turnId: turn.turnId,
+              });
             }),
       { concurrency: 1 },
     );

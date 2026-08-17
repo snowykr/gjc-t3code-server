@@ -3,6 +3,7 @@ import {
   type CheckpointRef,
   EventId,
   MessageId,
+  ProviderDriverKind,
   type ProjectId,
   ThreadId,
   TurnId,
@@ -150,6 +151,34 @@ const make = Effect.gen(function* () {
         return deferred === undefined ? Effect.void : Deferred.await(deferred);
       }),
     );
+  const reconcileInterruptedTurn = Effect.fn("reconcileInterruptedTurn")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+  }) {
+    const thread = yield* resolveThreadDetail(input.threadId);
+    if (!thread || thread.checkpoints.some((checkpoint) => checkpoint.turnId === input.turnId)) {
+      return;
+    }
+    yield* registerAbortCheckpoint(input);
+    const event: Extract<ProviderRuntimeEvent, { type: "turn.aborted" }> = {
+      type: "turn.aborted",
+      eventId: yield* serverEventId,
+      provider: ProviderDriverKind.make(thread.session?.providerName ?? "codex"),
+      threadId: input.threadId,
+      turnId: input.turnId,
+      createdAt: yield* nowIso,
+      payload: { reason: "Recovered interrupted turn checkpoint" },
+    };
+    yield* captureCheckpointFromTurnTerminal(event).pipe(
+      Effect.ensuring(
+        completeAbortCheckpoint({
+          threadId: input.threadId,
+          turnId: input.turnId,
+          preserveCompletion: true,
+        }),
+      ),
+    );
+  });
 
   const appendRevertFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -1080,6 +1109,7 @@ const make = Effect.gen(function* () {
     drain: worker.drain,
     awaitAbortCheckpoint,
     registerAbortCheckpoint,
+    reconcileInterruptedTurn,
   } satisfies CheckpointReactorShape;
 });
 
