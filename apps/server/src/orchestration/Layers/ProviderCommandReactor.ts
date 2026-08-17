@@ -1180,6 +1180,21 @@ const make = Effect.gen(function* () {
         ),
       );
 
+    const interruptedTurns = yield* projectionTurnRepository.listByThreadId({
+      threadId: event.payload.threadId,
+    });
+    yield* Effect.forEach(
+      interruptedTurns.filter((turn) => turn.turnId !== null && turn.state === "interrupted"),
+      (turn) =>
+        turn.turnId === null
+          ? Effect.void
+          : checkpointReactor.awaitAbortCheckpoint({
+              threadId: event.payload.threadId,
+              turnId: turn.turnId,
+            }),
+      { concurrency: 1 },
+    );
+
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       messageText: message.text,
@@ -1198,20 +1213,6 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const interruptedTurns = yield* projectionTurnRepository.listByThreadId({
-      threadId: event.payload.threadId,
-    });
-    yield* Effect.forEach(
-      interruptedTurns.filter((turn) => turn.turnId !== null && turn.state === "interrupted"),
-      (turn) =>
-        turn.turnId === null
-          ? Effect.void
-          : checkpointReactor.awaitAbortCheckpoint({
-              threadId: event.payload.threadId,
-              turnId: turn.turnId,
-            }),
-      { concurrency: 1 },
-    );
     yield* providerService
       .sendTurn(sendTurnRequest.value)
       .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);

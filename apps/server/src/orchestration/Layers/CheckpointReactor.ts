@@ -124,12 +124,13 @@ const make = Effect.gen(function* () {
   const completeAbortCheckpoint = Effect.fn("completeAbortCheckpoint")(function* (input: {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
+    readonly preserveCompletion: boolean;
   }) {
     const key = abortCheckpointKey(input.threadId, input.turnId);
     const deferred = yield* Ref.modify(abortCheckpointDeferreds, (current) => {
       const next = new Map(current);
       const value = next.get(key);
-      next.set(key, "completed");
+      if (value !== undefined || input.preserveCompletion) next.set(key, "completed");
       return [value, next] as const;
     });
     if (deferred !== undefined && deferred !== "completed") {
@@ -493,6 +494,7 @@ const make = Effect.gen(function* () {
         assistantMessageId: undefined,
         createdAt: event.createdAt,
       });
+      return true;
     },
   );
 
@@ -967,7 +969,13 @@ const make = Effect.gen(function* () {
         );
       }).pipe(
         event.type === "turn.aborted" && turnId
-          ? Effect.ensuring(completeAbortCheckpoint({ threadId: event.threadId, turnId }))
+          ? Effect.ensuring(
+              completeAbortCheckpoint({
+                threadId: event.threadId,
+                turnId,
+                preserveCompletion: false,
+              }),
+            )
           : (effect) => effect,
       );
       return;
