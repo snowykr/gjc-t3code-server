@@ -42,6 +42,11 @@ export interface CheckpointReactorShape {
     readonly turnId: TurnId;
   }) => Effect.Effect<void>;
 
+  readonly cancelAbortCheckpoint: (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+  }) => Effect.Effect<void>;
+
   readonly reconcileInterruptedTurn: (input: {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;

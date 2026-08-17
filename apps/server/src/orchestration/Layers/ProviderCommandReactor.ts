@@ -1278,7 +1278,16 @@ const make = Effect.gen(function* () {
       threadId: event.payload.threadId,
       turnId: event.payload.turnId,
     });
-    yield* providerService.interruptTurn({ threadId: event.payload.threadId });
+    yield* providerService.interruptTurn({ threadId: event.payload.threadId }).pipe(
+      Effect.catchCause((cause) =>
+        checkpointReactor
+          .cancelAbortCheckpoint({
+            threadId: event.payload.threadId,
+            turnId: event.payload.turnId,
+          })
+          .pipe(Effect.zipRight(Effect.failCause(cause))),
+      ),
+    );
   });
 
   const processTurnSteerRequested = Effect.fn("processTurnSteerRequested")(function* (

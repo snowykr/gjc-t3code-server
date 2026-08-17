@@ -153,6 +153,20 @@ const make = Effect.gen(function* () {
           : Deferred.await(deferred).pipe(Effect.as(true));
       }),
     );
+  const cancelAbortCheckpoint = (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
+    Ref.modify(abortCheckpointDeferreds, (current) => {
+      const key = abortCheckpointKey(input.threadId, input.turnId);
+      const deferred = current.get(key);
+      const next = new Map(current);
+      next.delete(key);
+      return [deferred, next] as const;
+    }).pipe(
+      Effect.flatMap((deferred) =>
+        deferred === undefined || deferred === "completed"
+          ? Effect.void
+          : Deferred.succeed(deferred, undefined).pipe(Effect.asVoid),
+      ),
+    );
   const reconcileInterruptedTurn = Effect.fn("reconcileInterruptedTurn")(function* (input: {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
@@ -1143,6 +1157,7 @@ const make = Effect.gen(function* () {
     drain: worker.drain,
     awaitAbortCheckpoint,
     registerAbortCheckpoint,
+    cancelAbortCheckpoint,
     reconcileInterruptedTurn,
   } satisfies CheckpointReactorShape;
 });

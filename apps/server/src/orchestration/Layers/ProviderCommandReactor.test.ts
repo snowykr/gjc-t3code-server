@@ -412,6 +412,7 @@ describe("ProviderCommandReactor", () => {
           drain: Effect.void,
           awaitAbortCheckpoint: () => Effect.succeed(false),
           registerAbortCheckpoint: () => Effect.void,
+          cancelAbortCheckpoint: () => Effect.void,
           reconcileInterruptedTurn: () => Effect.void,
         }),
       ),
