@@ -1195,10 +1195,20 @@ const make = Effect.gen(function* () {
         turnId: interruptedTurn.turnId,
       });
       if (!observedAbortCheckpoint) {
-        yield* checkpointReactor.reconcileInterruptedTurn({
-          threadId: event.payload.threadId,
-          turnId: interruptedTurn.turnId,
-        });
+        yield* checkpointReactor
+          .reconcileInterruptedTurn({
+            threadId: event.payload.threadId,
+            turnId: interruptedTurn.turnId,
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("failed to reconcile interrupted checkpoint before turn start", {
+                threadId: event.payload.threadId,
+                turnId: interruptedTurn.turnId,
+                cause: Cause.pretty(cause),
+              }),
+            ),
+          );
         yield* checkpointReactor.awaitAbortCheckpoint({
           threadId: event.payload.threadId,
           turnId: interruptedTurn.turnId,

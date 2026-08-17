@@ -1563,6 +1563,16 @@ const make = Effect.gen(function* () {
 
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
+      if (
+        event.type === "turn.completed" &&
+        normalizeRuntimeTurnState(event.payload.state) === "cancelled"
+      ) {
+        return yield* processRuntimeEvent({
+          ...event,
+          type: "turn.aborted",
+          payload: { reason: event.payload.stopReason ?? "Provider turn cancelled" },
+        });
+      }
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
 

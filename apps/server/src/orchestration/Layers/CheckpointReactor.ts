@@ -991,6 +991,13 @@ const make = Effect.gen(function* () {
   const processRuntimeEvent = Effect.fn("processRuntimeEvent")(function* (
     event: ProviderRuntimeEvent,
   ) {
+    if (event.type === "turn.completed" && event.payload.state === "cancelled") {
+      return yield* processRuntimeEvent({
+        ...event,
+        type: "turn.aborted",
+        payload: { reason: event.payload.stopReason ?? "Provider turn cancelled" },
+      });
+    }
     if (event.type === "turn.started") {
       yield* ensurePreTurnBaselineFromTurnStart(event);
       return;
