@@ -27,6 +27,8 @@ import {
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
+import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { forkParked } from "../../serverActivation.ts";
@@ -88,6 +90,7 @@ const make = Effect.gen(function* () {
     randomUUID.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerService = yield* ProviderService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const receiptBus = yield* RuntimeReceiptBus;
@@ -372,17 +375,25 @@ const make = Effect.gen(function* () {
       if (event.type === "turn.aborted") {
         const abortMatchesActiveTurn =
           thread.session?.status === "running" && sameId(thread.session.activeTurnId, turnId);
+        const interruptedTurn = yield* projectionTurnRepository.getByTurnId({
+          threadId: thread.id,
+          turnId,
+        });
         const abortFollowsInterruptedTurn =
-          thread.session?.status === "interrupted" &&
-          thread.latestTurn?.state === "interrupted" &&
-          sameId(thread.latestTurn.turnId, turnId);
+          Option.isSome(interruptedTurn) && interruptedTurn.value.state === "interrupted";
         if (!abortMatchesActiveTurn && !abortFollowsInterruptedTurn) {
           return;
         }
       }
 
-      // When a primary turn is active, only that turn may produce completion checkpoints.
-      if (thread.session?.activeTurnId && !sameId(thread.session.activeTurnId, turnId)) {
+      // Completion events must match the active turn. Accepted aborts may be
+      // queued behind a new turn, so their durable interrupted turn row is
+      // the authoritative ownership proof instead.
+      if (
+        event.type !== "turn.aborted" &&
+        thread.session?.activeTurnId &&
+        !sameId(thread.session.activeTurnId, turnId)
+      ) {
         return;
       }
 
@@ -966,4 +977,6 @@ const make = Effect.gen(function* () {
   } satisfies CheckpointReactorShape;
 });
 
-export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make);
+export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make).pipe(
+  Layer.provide(ProjectionTurnRepositoryLive),
+);
