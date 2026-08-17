@@ -481,6 +481,7 @@ describe("CheckpointReactor", () => {
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       provider,
       cwd,
+      checkpointStore,
       drain,
       receipts,
       registerAbortCheckpoint: (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) =>
@@ -670,6 +671,125 @@ describe("CheckpointReactor", () => {
     ).toHaveLength(1);
   });
 
+  it("refreshes a ready mid-turn checkpoint when an accepted abort arrives", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-aborted-after-mid-turn-checkpoint");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-mid-turn-checkpoint"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-mid-turn-checkpoint"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId,
+    });
+    await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0));
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "mid-turn work\n", "utf8");
+    await runtime!.runPromise(
+      harness.checkpointStore.captureCheckpoint({
+        cwd: harness.cwd,
+        checkpointRef: checkpointRefForThreadTurn(threadId, 1),
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-mid-turn-checkpoint-ready"),
+        threadId,
+        turnId,
+        completedAt: createdAt,
+        checkpointRef: checkpointRefForThreadTurn(threadId, 1),
+        status: "ready",
+        files: [],
+        assistantMessageId: MessageId.make("assistant-mid-turn-checkpoint"),
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+    await waitForThread(harness.readModel, (entry) => entry.checkpoints.length === 1);
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "later abort edit\n", "utf8");
+    await harness.registerAbortCheckpoint({ threadId, turnId });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-interrupted-mid-turn-checkpoint"),
+        threadId,
+        session: {
+          threadId,
+          status: "interrupted",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    harness.provider.emit({
+      type: "turn.aborted",
+      eventId: EventId.make("evt-turn-aborted-after-mid-turn-checkpoint"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId,
+      turnId,
+      payload: { reason: "user requested interruption" },
+    });
+
+    await waitForReceipt(
+      harness.receipts,
+      (receipt) =>
+        receipt.type === "checkpoint.diff.finalized" &&
+        receipt.turnId === turnId &&
+        receipt.status === "ready",
+    );
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity) =>
+          activity.kind === "checkpoint.captured" &&
+          activity.turnId === turnId &&
+          typeof activity.payload === "object" &&
+          activity.payload !== null &&
+          !Array.isArray(activity.payload) &&
+          (activity.payload as { readonly isTerminalAbort?: unknown }).isTerminalAbort === true,
+      ),
+    );
+    await harness.drain();
+    expect(
+      gitShowFileAtRef(harness.cwd, checkpointRefForThreadTurn(threadId, 1), "README.md"),
+    ).toBe("later abort edit\n");
+
+    const captureActivity = thread.activities
+      .toReversed()
+      .find((activity) => activity.kind === "checkpoint.captured" && activity.turnId === turnId);
+    expect(
+      (captureActivity?.payload as { readonly isTerminalAbort?: unknown } | undefined)
+        ?.isTerminalAbort,
+    ).toBe(true);
+  });
+
   it("does not checkpoint a stale abort without a matching active or interrupted turn", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const threadId = ThreadId.make("thread-1");
@@ -690,7 +810,7 @@ describe("CheckpointReactor", () => {
     expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 1))).toBe(false);
   });
 
-  it("does not recapture a ready terminal checkpoint during interruption reconciliation", async () => {
+  it("does not recapture a finalized terminal abort after its in-memory gate is lost", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const threadId = ThreadId.make("thread-1");
     const turnId = asTurnId("turn-aborted-checkpoint-reconcile");
@@ -767,6 +887,15 @@ describe("CheckpointReactor", () => {
           checkpoint.checkpointTurnCount === 1,
       ),
     );
+    const finalizedSnapshot = await harness.readModel();
+    const finalizedThread = finalizedSnapshot.threads.find((entry) => entry.id === threadId);
+    const captureActivity = finalizedThread?.activities.find(
+      (activity) => activity.kind === "checkpoint.captured" && activity.turnId === turnId,
+    );
+    expect(
+      (captureActivity?.payload as { readonly isTerminalAbort?: unknown } | undefined)
+        ?.isTerminalAbort,
+    ).toBe(true);
     await harness.drain();
     expect(await harness.awaitAbortCheckpoint({ threadId, turnId })).toBe(true);
     expect(await harness.awaitAbortCheckpoint({ threadId, turnId })).toBe(false);

@@ -74,6 +74,26 @@ function sameId(left: string | null | undefined, right: string | null | undefine
 
 const abortCheckpointKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 
+function hasTerminalAbortCaptureMarker(
+  activity: {
+    readonly kind: string;
+    readonly turnId: TurnId | null;
+    readonly payload: unknown;
+  },
+  turnId: TurnId,
+): boolean {
+  if (activity.kind !== "checkpoint.captured" || activity.turnId !== turnId) {
+    return false;
+  }
+  const payload = activity.payload;
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    (payload as { readonly isTerminalAbort?: unknown }).isTerminalAbort === true
+  );
+}
+
 function checkpointStatusFromRuntime(status: string | undefined): "ready" | "missing" | "error" {
   switch (status) {
     case "failed":
@@ -178,6 +198,15 @@ const make = Effect.gen(function* () {
       thread.latestTurn?.turnId !== input.turnId ||
       thread.latestTurn.state !== "interrupted"
     ) {
+      return;
+    }
+    const hasReadyCheckpoint = thread.checkpoints.some(
+      (checkpoint) => checkpoint.turnId === input.turnId && checkpoint.status === "ready",
+    );
+    const hasTerminalAbortCapture = thread.activities.some((activity) =>
+      hasTerminalAbortCaptureMarker(activity, input.turnId),
+    );
+    if (hasReadyCheckpoint && hasTerminalAbortCapture) {
       return;
     }
     yield* registerAbortCheckpoint(input);
@@ -343,6 +372,7 @@ const make = Effect.gen(function* () {
     readonly cwd: string;
     readonly turnCount: number;
     readonly status: "ready" | "missing" | "error";
+    readonly isTerminalAbort?: boolean;
     readonly assistantMessageId: MessageId | undefined;
     readonly createdAt: string;
   }) {
@@ -455,6 +485,7 @@ const make = Effect.gen(function* () {
         payload: {
           turnCount: input.turnCount,
           status: input.status,
+          ...(input.isTerminalAbort === true ? { isTerminalAbort: true } : {}),
         },
         turnId: input.turnId,
         createdAt: input.createdAt,
@@ -485,7 +516,11 @@ const make = Effect.gen(function* () {
         const hasReadyCheckpoint = thread.checkpoints.some(
           (checkpoint) => checkpoint.turnId === turnId && checkpoint.status === "ready",
         );
-        if (hasReadyCheckpoint) {
+        const hasOutstandingAbortGate = abortGate !== undefined && abortGate !== "completed";
+        const hasTerminalAbortCapture = thread.activities.some((activity) =>
+          hasTerminalAbortCaptureMarker(activity, turnId),
+        );
+        if (hasReadyCheckpoint && !hasOutstandingAbortGate && hasTerminalAbortCapture) {
           return;
         }
         const abortMatchesActiveTurn =
@@ -559,6 +594,7 @@ const make = Effect.gen(function* () {
         status: checkpointStatusFromRuntime(
           event.type === "turn.aborted" ? "completed" : event.payload.state,
         ),
+        isTerminalAbort: event.type === "turn.aborted",
         assistantMessageId: undefined,
         createdAt: event.createdAt,
       });
