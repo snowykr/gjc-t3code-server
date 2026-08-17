@@ -19,9 +19,9 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
+    yield* checkpointReactor.start();
     yield* providerRuntimeIngestion.start();
     yield* providerCommandReactor.start();
-    yield* checkpointReactor.start();
     yield* threadDeletionReactor.start();
     yield* agentAwarenessRelay.start();
   });

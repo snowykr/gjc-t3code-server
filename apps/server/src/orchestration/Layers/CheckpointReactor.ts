@@ -998,7 +998,10 @@ const make = Effect.gen(function* () {
   const processRuntimeEvent = Effect.fn("processRuntimeEvent")(function* (
     event: ProviderRuntimeEvent,
   ) {
-    if (event.type === "turn.completed" && event.payload.state === "cancelled") {
+    if (
+      event.type === "turn.completed" &&
+      (event.payload.state === "cancelled" || event.payload.state === "interrupted")
+    ) {
       return yield* processRuntimeEvent({
         ...event,
         type: "turn.aborted",

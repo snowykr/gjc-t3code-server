@@ -1565,7 +1565,8 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       if (
         event.type === "turn.completed" &&
-        normalizeRuntimeTurnState(event.payload.state) === "cancelled"
+        (normalizeRuntimeTurnState(event.payload.state) === "cancelled" ||
+          normalizeRuntimeTurnState(event.payload.state) === "interrupted")
       ) {
         return yield* processRuntimeEvent({
           ...event,
