@@ -1183,28 +1183,22 @@ const make = Effect.gen(function* () {
     const interruptedTurns = yield* projectionTurnRepository.listByThreadId({
       threadId: event.payload.threadId,
     });
-    yield* Effect.forEach(
-      interruptedTurns.filter((turn) => turn.turnId !== null && turn.state === "interrupted"),
+    const interruptedTurn = interruptedTurns.find(
       (turn) =>
-        turn.turnId === null
-          ? Effect.void
-          : Effect.gen(function* () {
-              if (
-                turn.checkpointRef === null ||
-                String(turn.checkpointRef).startsWith("provider-diff:")
-              ) {
-                yield* checkpointReactor.reconcileInterruptedTurn({
-                  threadId: event.payload.threadId,
-                  turnId: turn.turnId,
-                });
-              }
-              yield* checkpointReactor.awaitAbortCheckpoint({
-                threadId: event.payload.threadId,
-                turnId: turn.turnId,
-              });
-            }),
-      { concurrency: 1 },
+        turn.turnId !== null &&
+        turn.turnId === thread.latestTurn?.turnId &&
+        turn.state === "interrupted",
     );
+    if (interruptedTurn?.turnId !== null && interruptedTurn?.turnId !== undefined) {
+      yield* checkpointReactor.reconcileInterruptedTurn({
+        threadId: event.payload.threadId,
+        turnId: interruptedTurn.turnId,
+      });
+      yield* checkpointReactor.awaitAbortCheckpoint({
+        threadId: event.payload.threadId,
+        turnId: interruptedTurn.turnId,
+      });
+    }
 
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,

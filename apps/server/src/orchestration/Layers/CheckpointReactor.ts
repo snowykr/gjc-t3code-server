@@ -159,7 +159,8 @@ const make = Effect.gen(function* () {
     if (
       !thread ||
       thread.session?.status !== "interrupted" ||
-      thread.checkpoints.some((checkpoint) => checkpoint.turnId === input.turnId)
+      thread.latestTurn?.turnId !== input.turnId ||
+      thread.latestTurn.state !== "interrupted"
     ) {
       return;
     }
